@@ -8,6 +8,7 @@ import {
   warehouses,
   warehouseLocations,
   userWarehousePermissions,
+  productCategories,
   products,
   recipes,
   recipeVersions,
@@ -53,9 +54,10 @@ import {
 } from './src/db/inventory-engine.ts';
 import {
   ensureBaseCatalogAndUsers,
-  runAutomatedVerificationSuite,
+  makeDefaultProductPhoto,
+  resetAllInventoryToZeroForProduction,
 } from './src/db/seed.ts';
-import { eq, desc, inArray, and } from 'drizzle-orm';
+import { eq, desc, and, inArray } from 'drizzle-orm';
 
 dotenv.config();
 
@@ -63,7 +65,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(express.json({ limit: '12mb' }));
 
   // =========================================================================
   // 1. HEALTH & IDEMPOTENCY STATUS CHECK
@@ -82,35 +84,15 @@ async function startServer() {
     }
   });
 
-  app.get('/api/idempotency/:key', requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const found = await db
-        .select()
-        .from(idempotencyKeys)
-        .where(eq(idempotencyKeys.key, req.params.key));
-      if (!found[0]) {
-        return res.json({ processed: false });
-      }
-      return res.json({
-        processed: true,
-        operationType: found[0].operationType,
-        responsePayload: found[0].responsePayload,
-        createdAt: found[0].createdAt,
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: 'No se pudo verificar el estado de la clave de operación.' });
-    }
-  });
-
   // =========================================================================
-  // 2. AUTHENTICATION & DEMO ROLE SWITCHER (For Test/Validation Environment)
+  // 2. AUTHENTICATION (admin / 1234 + Staff Accounts + Google Sign-In)
   // =========================================================================
   app.post('/api/auth/login', async (req, res) => {
     try {
       await ensureBaseCatalogAndUsers();
       const { username, password } = req.body;
       if (!username || !password) {
-        return res.status(400).json({ error: 'Ingrese usuario y contraseña.' });
+        return res.status(400).json({ error: 'Ingrese su usuario y contraseña.' });
       }
 
       const cleanUser = String(username).trim().toLowerCase();
@@ -153,28 +135,14 @@ async function startServer() {
   app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
     try {
       await ensureBaseCatalogAndUsers();
-      const allUsersList = await db
-        .select({
-          id: users.id,
-          username: users.username,
-          fullName: users.fullName,
-          role: users.role,
-          isActive: users.isActive,
-        })
-        .from(users)
-        .where(eq(users.isActive, true));
-
-      res.json({
-        user: req.authUser,
-        availableTestProfiles: allUsersList,
-      });
+      res.json({ user: req.authUser });
     } catch (error: any) {
       res.status(500).json({ error: 'No se pudo cargar el perfil de sesión.' });
     }
   });
 
   // =========================================================================
-  // 3. INITIAL STATE & FILTERED WORKSPACE DATA BY WAREHOUSE PERMISSIONS
+  // 3. WORKSPACE DATA FILTERED BY WAREHOUSE PERMISSIONS
   // =========================================================================
   app.get('/api/workspace', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -184,27 +152,6 @@ async function startServer() {
       const allowedWarehouseIds = isGlobalAdmin
         ? null
         : user.warehousePermissions.filter((p) => p.canView).map((p) => p.warehouseId);
-
-      // Optional warehouse filter parameter to test IDOR protection explicitly
-      const requestedWarehouseId = req.query.warehouseId
-        ? Number(req.query.warehouseId)
-        : null;
-
-      if (
-        requestedWarehouseId &&
-        !assertWarehouseAccess(user, requestedWarehouseId, 'VIEW')
-      ) {
-        await logSecurityEvent(
-          user.id,
-          user.username,
-          'IDOR_ATTEMPT',
-          req.originalUrl,
-          `Usuario intentó consultar almacén ID ${requestedWarehouseId} sin autorización.`
-        );
-        return res.status(403).json({
-          error: `Acceso denegado (403): No tiene autorización para consultar existencias ni movimientos del almacén solicitado.`,
-        });
-      }
 
       const allWarehouses = await db.select().from(warehouses);
       const visibleWarehouses = isGlobalAdmin
@@ -218,7 +165,15 @@ async function startServer() {
         visibleWarehouseIdSet.has(l.warehouseId)
       );
 
-      const allProducts = await db.select().from(products);
+      const categories = await db
+        .select()
+        .from(productCategories)
+        .orderBy(productCategories.id);
+
+      const allProducts = await db
+        .select()
+        .from(products)
+        .orderBy(desc(products.createdAt));
 
       // Recipes with BOM lines
       const allRecipes = await db.select().from(recipes);
@@ -241,13 +196,11 @@ async function startServer() {
         };
       });
 
-      // Balances strictly filtered by authorized warehouses
       const rawBalances = await db.select().from(inventoryBalances);
       const visibleBalances = rawBalances.filter(
         (b) => b.quantity > 0 && visibleWarehouseIdSet.has(b.warehouseId)
       );
 
-      // Production orders filtered by source or target warehouse authorization
       const rawOrders = await db
         .select()
         .from(productionOrders)
@@ -299,21 +252,10 @@ async function startServer() {
         .select()
         .from(physicalCounts)
         .orderBy(desc(physicalCounts.createdAt));
-      const visibleCounts = rawCounts
-        .filter((c) => visibleWarehouseIdSet.has(c.warehouseId))
-        .map((c) => {
-          // If user is not OWNER/ADMIN and count is blind & pending, hide systemExpectedQty
-          if (!isGlobalAdmin && c.isBlindCount && c.status === 'PENDING_APPROVAL') {
-            return {
-              ...c,
-              systemExpectedQty: -1,
-              differenceQty: 0,
-            };
-          }
-          return c;
-        });
+      const visibleCounts = rawCounts.filter((c) =>
+        visibleWarehouseIdSet.has(c.warehouseId)
+      );
 
-      // Movement documents & ledger lines filtered by authorized warehouses
       const rawDocs = await db
         .select()
         .from(inventoryMovementDocuments)
@@ -347,7 +289,6 @@ async function startServer() {
         ? await db.select().from(userWarehousePermissions)
         : [];
 
-      // Notice: NO private purchase batches or costs are ever included in /api/workspace
       res.json({
         user,
         warehouses: visibleWarehouses,
@@ -365,6 +306,7 @@ async function startServer() {
           zoneName: l.zoneName,
           shelfName: l.shelfName,
         })),
+        categories,
         products: allProducts,
         recipes: enrichedRecipes,
         balances: visibleBalances,
@@ -382,120 +324,336 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error('Workspace fetch error:', error);
-      res.status(500).json({ error: error.message || 'Error al cargar datos operativos.' });
+      res.status(500).json({ error: error.message || 'Error al cargar datos del sistema.' });
     }
   });
 
   // =========================================================================
-  // 4. MASTER CATALOG, RECIPES & WAREHOUSE CONFIGURATION (Owner / Admin)
+  // 4. CLASSIFICATIONS / DEPARTMENTS CRUD (Crear, Editar, Eliminar)
+  // =========================================================================
+  app.post('/api/categories', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede crear clasificaciones.' });
+      }
+      const { name, accountingType, description, colorHex } = req.body;
+      if (!name || !String(name).trim()) {
+        return res.status(400).json({ error: 'El nombre de la clasificación es obligatorio.' });
+      }
+
+      const [created] = await db
+        .insert(productCategories)
+        .values({
+          name: String(name).trim(),
+          accountingType: accountingType || 'SECONDARY_COMPONENT',
+          description: description || '',
+          colorHex: colorHex || '#0284c7',
+        })
+        .returning();
+
+      return res.json({ category: created });
+    } catch (error: any) {
+      return res.status(400).json({ error: 'Ya existe una clasificación con ese nombre o datos inválidos.' });
+    }
+  });
+
+  app.put('/api/categories/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede editar clasificaciones.' });
+      }
+      const catId = Number(req.params.id);
+      const { name, accountingType, description, colorHex } = req.body;
+
+      const existing = await db
+        .select()
+        .from(productCategories)
+        .where(eq(productCategories.id, catId));
+      if (!existing[0]) {
+        return res.status(404).json({ error: 'Clasificación no encontrada.' });
+      }
+
+      const oldName = existing[0].name;
+      const newName = String(name || oldName).trim();
+      const newAccType = accountingType || existing[0].accountingType;
+
+      const [updated] = await db
+        .update(productCategories)
+        .set({
+          name: newName,
+          accountingType: newAccType,
+          description: description !== undefined ? description : existing[0].description,
+          colorHex: colorHex || existing[0].colorHex,
+        })
+        .where(eq(productCategories.id, catId))
+        .returning();
+
+      // Also sync products using this classification name
+      if (oldName !== newName || newAccType !== existing[0].accountingType) {
+        await db
+          .update(products)
+          .set({
+            family: newName,
+            productType: newAccType,
+          })
+          .where(eq(products.family, oldName));
+      }
+
+      return res.json({ category: updated });
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message || 'No se pudo actualizar la clasificación.' });
+    }
+  });
+
+  app.delete('/api/categories/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede eliminar clasificaciones.' });
+      }
+      const catId = Number(req.params.id);
+      await db.delete(productCategories).where(eq(productCategories.id, catId));
+      return res.json({ deleted: true });
+    } catch (error: any) {
+      return res.status(400).json({ error: 'No se pudo eliminar la clasificación.' });
+    }
+  });
+
+  // =========================================================================
+  // 5. SIMPLIFIED PRODUCTS CRUD (Crear con Cantidad Inicial, Editar, Eliminar)
   // =========================================================================
   app.post('/api/products', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        await logSecurityEvent(
-          user.id,
-          user.username,
-          'ACCESS_DENIED',
-          '/api/products',
-          'Intento de crear producto maestro sin permisos de Administrador/Propietario'
-        );
         return res.status(403).json({
-          error: 'Solo el Propietario o Administrador puede dar de alta productos en el catálogo maestro.',
+          error: 'Solo el Administrador puede crear productos en el catálogo.',
         });
       }
 
       const {
         sku,
         name,
-        description,
-        productType,
         family,
-        brand,
-        model,
-        capacity,
-        color,
-        material,
-        unitName,
-        unitsPerBox,
+        productType,
         imageUrl,
-        barcode,
         minStockAlert,
-        forceCreateDespiteDuplicateWarning,
+        initialQuantity,
+        initialWarehouseId,
+        initialLocationId,
       } = req.body;
 
-      if (!sku || !name || !productType || !family) {
-        return res.status(400).json({ error: 'SKU, nombre, tipo y familia son obligatorios.' });
+      if (!sku || !name || !family) {
+        return res.status(400).json({
+          error: 'Complete el SKU, la descripción del producto y su clasificación.',
+        });
       }
 
       const cleanSku = String(sku).trim().toUpperCase();
-      const normKey = normalizeProductKey(brand, model, capacity, color, material);
-
+      const cleanName = String(name).trim();
       const existingAll = await db.select().from(products);
       if (existingAll.some((p) => p.sku.toUpperCase() === cleanSku)) {
         return res.status(400).json({ error: `Ya existe un producto con el SKU ${cleanSku}.` });
       }
 
-      const duplicateAttrMatch = existingAll.find((p) => p.normalizedKey === normKey);
-      if (duplicateAttrMatch && !forceCreateDespiteDuplicateWarning) {
-        return res.status(409).json({
-          warningDuplicate: true,
-          existingProduct: duplicateAttrMatch,
-          error: `Posible duplicado detectado: Ya existe "${duplicateAttrMatch.name}" (${duplicateAttrMatch.sku}) con los mismos atributos de marca/modelo/capacidad/color. Confirme si desea crearlo de todos modos.`,
-        });
+      // Look up category accounting type if not explicitly provided
+      let resolvedType = productType;
+      if (!resolvedType) {
+        const cats = await db
+          .select()
+          .from(productCategories)
+          .where(eq(productCategories.name, String(family)));
+        resolvedType = cats[0]?.accountingType || 'SECONDARY_COMPONENT';
       }
+
+      const finalPhoto =
+        imageUrl && String(imageUrl).trim() !== ''
+          ? String(imageUrl)
+          : makeDefaultProductPhoto(cleanSku, cleanName);
 
       const [created] = await db
         .insert(products)
         .values({
           sku: cleanSku,
-          name: String(name).trim(),
-          normalizedKey: normKey,
-          description: description || '',
-          productType,
-          family,
-          brand: brand || 'Genérico',
-          model: model || 'Estándar',
-          capacity: capacity || 'N/A',
-          color: color || 'N/A',
-          material: material || 'N/A',
-          unitName: unitName || 'piezas',
-          unitsPerBox: Number(unitsPerBox) || 1000,
-          imageUrl: imageUrl || '',
-          barcode: barcode || '',
-          minStockAlert: Number(minStockAlert) || 500,
+          name: cleanName,
+          normalizedKey: normalizeProductKey(family, cleanName, cleanSku, '', ''),
+          description: cleanName,
+          productType: resolvedType,
+          family: String(family).trim(),
+          brand: String(family).trim(),
+          model: 'Estándar',
+          capacity: 'N/A',
+          color: 'N/A',
+          material: 'N/A',
+          unitName: 'unidades',
+          unitsPerBox: 1000,
+          imageUrl: finalPhoto,
+          barcode: '',
+          minStockAlert: Number(minStockAlert) || 100,
           isActive: true,
         })
         .returning();
 
+      // If the user specified an initial quantity > 0, register the opening stock immediately!
+      const initQty = Number(initialQuantity || 0);
+      if (initQty > 0) {
+        const allWhs = await db.select().from(warehouses);
+        const targetWhId = Number(initialWarehouseId) || allWhs[0]?.id;
+        const allLocs = await db.select().from(warehouseLocations);
+        const targetLocId =
+          Number(initialLocationId) ||
+          allLocs.find((l) => l.warehouseId === targetWhId)?.id ||
+          allLocs[0]?.id;
+
+        if (targetWhId && targetLocId) {
+          await registerGoodsReceipt({
+            idempotencyKey: `INIT-STOCK-${created.id}-${Date.now()}`,
+            userId: user.id,
+            movementType: 'APERTURA_INICIAL',
+            warehouseId: targetWhId,
+            locationId: targetLocId,
+            supplierOrContainer: 'Inventario Inicial al Crear Producto',
+            notes: `Stock inicial de ${cleanName}`,
+            lines: [{ productId: created.id, quantity: initQty }],
+          });
+        }
+      }
+
       return res.json({ product: created });
     } catch (error: any) {
-      res.status(500).json({ error: error.message || 'No se pudo guardar el producto.' });
+      return res.status(500).json({ error: error.message || 'No se pudo crear el producto.' });
     }
   });
 
+  app.put('/api/products/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede editar productos.' });
+      }
+
+      const prodId = Number(req.params.id);
+      const { sku, name, family, productType, imageUrl, minStockAlert } = req.body;
+
+      const existing = await db.select().from(products).where(eq(products.id, prodId));
+      if (!existing[0]) {
+        return res.status(404).json({ error: 'Producto no encontrado.' });
+      }
+
+      let resolvedType = productType || existing[0].productType;
+      if (family && !productType) {
+        const cats = await db
+          .select()
+          .from(productCategories)
+          .where(eq(productCategories.name, String(family)));
+        if (cats[0]) resolvedType = cats[0].accountingType;
+      }
+
+      const cleanSku = sku ? String(sku).trim().toUpperCase() : existing[0].sku;
+      const cleanName = name ? String(name).trim() : existing[0].name;
+      const cleanFamily = family ? String(family).trim() : existing[0].family;
+
+      const [updated] = await db
+        .update(products)
+        .set({
+          sku: cleanSku,
+          name: cleanName,
+          description: cleanName,
+          family: cleanFamily,
+          brand: cleanFamily,
+          productType: resolvedType,
+          minStockAlert:
+            minStockAlert !== undefined ? Number(minStockAlert) : existing[0].minStockAlert,
+          imageUrl:
+            imageUrl && String(imageUrl).trim() !== '' ? String(imageUrl) : existing[0].imageUrl,
+        })
+        .where(eq(products.id, prodId))
+        .returning();
+
+      return res.json({ product: updated });
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message || 'No se pudo actualizar el producto.' });
+    }
+  });
+
+  app.delete('/api/products/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede eliminar productos.' });
+      }
+
+      const prodId = Number(req.params.id);
+
+      // Clean up dependent records in a transaction so admin can freely delete any product
+      await db.transaction(async (tx) => {
+        await tx.delete(privatePurchaseBatches).where(eq(privatePurchaseBatches.productId, prodId));
+        await tx.delete(physicalCounts).where(eq(physicalCounts.productId, prodId));
+        await tx.delete(warehouseTransfers).where(eq(warehouseTransfers.productId, prodId));
+        await tx
+          .delete(finishedGoodsDispatches)
+          .where(eq(finishedGoodsDispatches.finishedProductId, prodId));
+        await tx.delete(productionDispatches).where(eq(productionDispatches.productId, prodId));
+        await tx
+          .delete(productionBatches)
+          .where(eq(productionBatches.finishedProductId, prodId));
+        await tx
+          .delete(productionOrders)
+          .where(eq(productionOrders.strategicProductId, prodId));
+        await tx
+          .delete(recipeComponents)
+          .where(eq(recipeComponents.componentProductId, prodId));
+
+        const prodRecipes = await tx
+          .select()
+          .from(recipes)
+          .where(eq(recipes.finishedProductId, prodId));
+        for (const r of prodRecipes) {
+          const vers = await tx
+            .select()
+            .from(recipeVersions)
+            .where(eq(recipeVersions.recipeId, r.id));
+          for (const v of vers) {
+            await tx
+              .delete(recipeComponents)
+              .where(eq(recipeComponents.recipeVersionId, v.id));
+          }
+          await tx.delete(productionBatches).where(eq(productionBatches.recipeId, r.id));
+          await tx.delete(recipeVersions).where(eq(recipeVersions.recipeId, r.id));
+          await tx.delete(recipes).where(eq(recipes.id, r.id));
+        }
+
+        await tx.delete(inventoryMovementLines).where(eq(inventoryMovementLines.productId, prodId));
+        await tx.delete(inventoryBalances).where(eq(inventoryBalances.productId, prodId));
+        await tx.delete(products).where(eq(products.id, prodId));
+      });
+
+      return res.json({ deleted: true });
+    } catch (error: any) {
+      console.error('Error deleting product:', error);
+      return res.status(400).json({ error: error.message || 'No se pudo eliminar el producto.' });
+    }
+  });
+
+  // =========================================================================
+  // 6. RECIPES (BOM) & WAREHOUSES CRUD (Crear, Editar, Eliminar)
+  // =========================================================================
   app.post('/api/recipes', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        await logSecurityEvent(
-          user.id,
-          user.username,
-          'ACCESS_DENIED',
-          '/api/recipes',
-          'Intento no autorizado de crear/modificar receta BOM'
-        );
         return res.status(403).json({
-          error: 'Acceso denegado: Solo el Propietario o personal autorizado puede administrar recetas (BOM).',
+          error: 'Solo el Administrador puede crear o editar recetas de ensamblaje.',
         });
       }
 
       const { recipeId, code, name, finishedProductId, changeReason, components } = req.body;
       if (!components || !Array.isArray(components) || components.length === 0) {
-        return res.status(400).json({ error: 'La receta debe incluir al menos un componente.' });
+        return res.status(400).json({ error: 'La receta debe incluir al menos un insumo.' });
       }
 
-      // If recipeId is provided -> create a new version without rewriting historical batches!
       if (recipeId) {
         const existingRecs = await db
           .select()
@@ -515,9 +673,9 @@ async function startServer() {
           .values({
             recipeId: rec.id,
             versionNumber: nextVerNum,
-            finishedProductId: rec.finishedProductId,
+            finishedProductId: Number(finishedProductId || rec.finishedProductId),
             isCurrent: true,
-            changeReason: changeReason || `Actualización a versión v${nextVerNum}`,
+            changeReason: changeReason || `Actualización v${nextVerNum}`,
             createdByUserId: user.id,
           })
           .returning();
@@ -533,7 +691,11 @@ async function startServer() {
 
         await db
           .update(recipes)
-          .set({ currentVersion: nextVerNum, name: name || rec.name })
+          .set({
+            currentVersion: nextVerNum,
+            name: name || rec.name,
+            finishedProductId: Number(finishedProductId || rec.finishedProductId),
+          })
           .where(eq(recipes.id, rec.id));
 
         return res.json({ recipeId: rec.id, newVersion: newVer });
@@ -541,7 +703,9 @@ async function startServer() {
         const [newRec] = await db
           .insert(recipes)
           .values({
-            code: String(code).trim().toUpperCase(),
+            code: String(code || `REC-${Date.now().toString().slice(-4)}`)
+              .trim()
+              .toUpperCase(),
             name: String(name).trim(),
             finishedProductId: Number(finishedProductId),
             currentVersion: 1,
@@ -579,22 +743,60 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/recipes/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede eliminar recetas.' });
+      }
+      const recId = Number(req.params.id);
+      await db.transaction(async (tx) => {
+        const vers = await tx
+          .select()
+          .from(recipeVersions)
+          .where(eq(recipeVersions.recipeId, recId));
+        for (const v of vers) {
+          await tx
+            .delete(recipeComponents)
+            .where(eq(recipeComponents.recipeVersionId, v.id));
+        }
+        await tx.delete(productionBatches).where(eq(productionBatches.recipeId, recId));
+        await tx.delete(recipeVersions).where(eq(recipeVersions.recipeId, recId));
+        await tx.delete(recipes).where(eq(recipes.id, recId));
+      });
+      return res.json({ deleted: true });
+    } catch (error: any) {
+      return res.status(400).json({ error: 'No se pudo eliminar la receta.' });
+    }
+  });
+
   app.post('/api/warehouses', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Solo el Propietario puede crear almacenes o ubicaciones.' });
+        return res.status(403).json({ error: 'Solo el Administrador puede configurar almacenes.' });
       }
 
-      const { type, code, name, description, address, isProductionPlant, warehouseId, zoneName, shelfName } =
-        req.body;
+      const {
+        type,
+        code,
+        name,
+        description,
+        address,
+        isProductionPlant,
+        warehouseId,
+        zoneName,
+        shelfName,
+      } = req.body;
 
       if (type === 'LOCATION') {
         const [loc] = await db
           .insert(warehouseLocations)
           .values({
             warehouseId: Number(warehouseId),
-            code: String(code).trim().toUpperCase(),
+            code: String(code || `UBI-${Date.now().toString().slice(-4)}`)
+              .trim()
+              .toUpperCase(),
             zoneName: String(zoneName).trim(),
             shelfName: String(shelfName).trim(),
             description: description || '',
@@ -604,10 +806,13 @@ async function startServer() {
           .returning();
         return res.json({ location: loc });
       } else {
+        const cleanCode = String(code || `ALM-${Date.now().toString().slice(-4)}`)
+          .trim()
+          .toUpperCase();
         const [wh] = await db
           .insert(warehouses)
           .values({
-            code: String(code).trim().toUpperCase(),
+            code: cleanCode,
             name: String(name).trim(),
             description: description || '',
             address: address || '',
@@ -618,10 +823,10 @@ async function startServer() {
 
         await db.insert(warehouseLocations).values({
           warehouseId: wh.id,
-          code: `${wh.code}-GEN-1`,
-          zoneName: 'Zona Principal',
+          code: `${wh.code}-PRIN`,
+          zoneName: 'Sección Principal',
           shelfName: 'Estante 1',
-          description: 'Ubicación predeterminada',
+          description: 'Ubicación principal predeterminada',
           isDefault: true,
           isActive: true,
         });
@@ -633,8 +838,127 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/warehouses/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede eliminar almacenes.' });
+      }
+      const whId = Number(req.params.id);
+      await db.transaction(async (tx) => {
+        // Clean up orders associated with this warehouse
+        const ordersInWh = await tx
+          .select()
+          .from(productionOrders);
+        const orderIds = ordersInWh
+          .filter((o) => o.sourceWarehouseId === whId || o.targetWarehouseId === whId)
+          .map((o) => o.id);
+
+        if (orderIds.length > 0) {
+          await tx
+            .delete(productionBatches)
+            .where(inArray(productionBatches.productionOrderId, orderIds));
+          await tx
+            .delete(productionDispatches)
+            .where(inArray(productionDispatches.productionOrderId, orderIds));
+          await tx
+            .delete(finishedGoodsDispatches)
+            .where(inArray(finishedGoodsDispatches.productionOrderId, orderIds));
+          await tx
+            .delete(productionOrders)
+            .where(inArray(productionOrders.id, orderIds));
+        }
+
+        await tx
+          .delete(productionBatches)
+          .where(eq(productionBatches.warehouseId, whId));
+        await tx
+          .delete(finishedGoodsDispatches)
+          .where(eq(finishedGoodsDispatches.fromWarehouseId, whId));
+        await tx
+          .delete(finishedGoodsDispatches)
+          .where(eq(finishedGoodsDispatches.toWarehouseId, whId));
+        await tx
+          .delete(warehouseTransfers)
+          .where(eq(warehouseTransfers.fromWarehouseId, whId));
+        await tx
+          .delete(warehouseTransfers)
+          .where(eq(warehouseTransfers.toWarehouseId, whId));
+        await tx
+          .delete(physicalCounts)
+          .where(eq(physicalCounts.warehouseId, whId));
+        const docsInWh = await tx.select().from(inventoryMovementDocuments);
+        const docIds = docsInWh
+          .filter((d) => d.sourceWarehouseId === whId || d.destWarehouseId === whId)
+          .map((d) => d.id);
+
+        if (docIds.length > 0) {
+          await tx
+            .delete(privatePurchaseBatches)
+            .where(inArray(privatePurchaseBatches.movementDocumentId, docIds));
+          await tx
+            .delete(inventoryMovementLines)
+            .where(inArray(inventoryMovementLines.documentId, docIds));
+        }
+
+        await tx
+          .delete(inventoryMovementLines)
+          .where(eq(inventoryMovementLines.fromWarehouseId, whId));
+        await tx
+          .delete(inventoryMovementLines)
+          .where(eq(inventoryMovementLines.toWarehouseId, whId));
+        await tx
+          .delete(inventoryMovementDocuments)
+          .where(eq(inventoryMovementDocuments.sourceWarehouseId, whId));
+        await tx
+          .delete(inventoryMovementDocuments)
+          .where(eq(inventoryMovementDocuments.destWarehouseId, whId));
+        await tx
+          .delete(userWarehousePermissions)
+          .where(eq(userWarehousePermissions.warehouseId, whId));
+        await tx
+          .delete(inventoryBalances)
+          .where(eq(inventoryBalances.warehouseId, whId));
+        await tx
+          .delete(warehouseLocations)
+          .where(eq(warehouseLocations.warehouseId, whId));
+        await tx
+          .delete(warehouses)
+          .where(eq(warehouses.id, whId));
+      });
+      return res.json({ deleted: true });
+    } catch (error: any) {
+      return res.status(400).json({
+        error: error.message || 'No se pudo eliminar el almacén.',
+      });
+    }
+  });
+
+  app.delete('/api/warehouses/locations/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede eliminar ubicaciones.' });
+      }
+      const locId = Number(req.params.id);
+      await db.transaction(async (tx) => {
+        await tx
+          .delete(inventoryBalances)
+          .where(eq(inventoryBalances.locationId, locId));
+        await tx
+          .delete(warehouseLocations)
+          .where(eq(warehouseLocations.id, locId));
+      });
+      return res.json({ deleted: true });
+    } catch (error: any) {
+      return res.status(400).json({
+        error: 'No se puede eliminar un estante con historial de operaciones.',
+      });
+    }
+  });
+
   // =========================================================================
-  // 5. GOODS RECEIPT (INGRESO DE PROVEEDOR O CONTENEDOR)
+  // 7. GOODS RECEIPT & STOCK OPERATIONS
   // =========================================================================
   app.post('/api/inventory/receipts', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -650,19 +974,11 @@ async function startServer() {
       } = req.body;
 
       if (!assertWarehouseAccess(user, Number(warehouseId), 'RECEIVE')) {
-        await logSecurityEvent(
-          user.id,
-          user.username,
-          'ACCESS_DENIED',
-          '/api/inventory/receipts',
-          `Intento de registrar ingreso en almacén ID ${warehouseId} sin permiso.`
-        );
         return res.status(403).json({
           error: 'No tiene permiso para registrar ingresos en el almacén seleccionado.',
         });
       }
 
-      // Strip privateCost if user is not Owner
       const sanitizedLines = (lines || []).map((l: any) => ({
         productId: Number(l.productId),
         quantity: Number(l.quantity),
@@ -689,7 +1005,7 @@ async function startServer() {
   });
 
   // =========================================================================
-  // 6. PRODUCTION ORDERS, DISPATCHES, ACKNOWLEDGEMENTS & BATCHES
+  // 8. PRODUCTION ORDERS, DISPATCHES, ACKNOWLEDGEMENTS & BATCHES
   // =========================================================================
   app.post('/api/production/orders', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -707,7 +1023,7 @@ async function startServer() {
         sourceLocationId: Number(req.body.sourceLocationId),
         targetWarehouseId: Number(req.body.targetWarehouseId),
         targetLocationId: Number(req.body.targetLocationId),
-        assignedUserId: Number(req.body.assignedUserId),
+        assignedUserId: Number(req.body.assignedUserId || user.id),
         strategicProductId: Number(req.body.strategicProductId),
         authorizedQty: Number(req.body.authorizedQty),
         allowedRecipeIds: Array.isArray(req.body.allowedRecipeIds)
@@ -792,7 +1108,7 @@ async function startServer() {
   });
 
   // =========================================================================
-  // 7. FINISHED GOODS PICKUP & FORMAL RECEIPT
+  // 9. FINISHED GOODS PICKUP & TRANSFERS & COUNTS
   // =========================================================================
   app.post('/api/finished-goods/dispatch', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -829,21 +1145,11 @@ async function startServer() {
     }
   });
 
-  // =========================================================================
-  // 8. TRANSFERS & PHYSICAL COUNTS
-  // =========================================================================
   app.post('/api/transfers/dispatch', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
       const fromWarehouseId = Number(req.body.fromWarehouseId);
       if (!assertWarehouseAccess(user, fromWarehouseId, 'DISPATCH')) {
-        await logSecurityEvent(
-          user.id,
-          user.username,
-          'ACCESS_DENIED',
-          '/api/transfers/dispatch',
-          `Intento de despachar desde almacén ${fromWarehouseId} sin permiso.`
-        );
         return res.status(403).json({
           error: 'No tiene permiso para despachar mercadería desde el almacén de origen.',
         });
@@ -913,7 +1219,7 @@ async function startServer() {
       const user = req.authUser!;
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
         return res.status(403).json({
-          error: 'Solo el Propietario o Administrador puede aprobar ajustes por diferencia de conteo físico.',
+          error: 'Solo el Propietario o Administrador puede aprobar ajustes por conteo.',
         });
       }
 
@@ -931,8 +1237,7 @@ async function startServer() {
   });
 
   // =========================================================================
-  // 9. OWNER PRIVATE ZONE (PURCHASES, LANDED COSTS & STRATEGIC CUSTODY)
-  // Strictly protected by requireOwnerPrivateAccess
+  // 10. OWNER PRIVATE ZONE & USER MANAGEMENT
   // =========================================================================
   app.get('/api/private/overview', requireAuth, requireOwnerPrivateAccess, async (_req, res) => {
     try {
@@ -958,159 +1263,95 @@ async function startServer() {
     }
   });
 
-  app.post('/api/private/costs', requireAuth, requireOwnerPrivateAccess, async (req: AuthRequest, res) => {
-    try {
-      const user = req.authUser!;
-      const {
-        batchCode,
-        productId,
-        supplierName,
-        containerOrPolicyRef,
-        quantityPurchased,
-        currency,
-        fobTotalCost,
-        freightCost,
-        customsPolicyCost,
-        otherImportExpenses,
-        privateNotes,
-      } = req.body;
-
-      const qty = Number(quantityPurchased);
-      if (!qty || qty <= 0) {
-        return res.status(400).json({ error: 'La cantidad comprada debe ser mayor a cero.' });
-      }
-
-      const fob = Number(fobTotalCost || 0);
-      const freight = Number(freightCost || 0);
-      const customs = Number(customsPolicyCost || 0);
-      const other = Number(otherImportExpenses || 0);
-      const totalLanded = fob + freight + customs + other;
-      const unitLanded = totalLanded / qty;
-
-      const [created] = await db
-        .insert(privatePurchaseBatches)
-        .values({
-          batchCode: batchCode || `LOTE-PRIV-${Date.now().toString().slice(-6)}`,
-          productId: Number(productId),
-          supplierName: supplierName || 'Proveedor Internacional',
-          containerOrPolicyRef: containerOrPolicyRef || '',
-          quantityPurchased: qty,
-          currency: currency || 'USD',
-          fobTotalCost: fob.toFixed(4),
-          freightCost: freight.toFixed(4),
-          customsPolicyCost: customs.toFixed(4),
-          otherImportExpenses: other.toFixed(4),
-          totalLandedCost: totalLanded.toFixed(4),
-          unitLandedCost: unitLanded.toFixed(6),
-          privateNotes: privateNotes || '',
-          createdByUserId: user.id,
-        })
-        .returning();
-
-      return res.json({ batch: created });
-    } catch (error: any) {
-      return res.status(400).json({ error: error.message || 'No se pudo registrar el lote de costo privado.' });
-    }
-  });
-
-  // =========================================================================
-  // 10. USER & PERMISSION MANAGEMENT + AUTOMATED TEST SUITE RUNNER
-  // =========================================================================
-  app.post('/api/users/permissions', requireAuth, async (req: AuthRequest, res) => {
-    try {
-      const user = req.authUser!;
-      if (user.role !== 'OWNER') {
-        return res.status(403).json({
-          error: 'Solo el Propietario puede modificar permisos de almacén o roles de usuarios.',
-        });
-      }
-
-      const { targetUserId, warehouseId, canView, canReceive, canDispatch, canProduce, canCount } =
-        req.body;
-
-      const existing = await db
-        .select()
-        .from(userWarehousePermissions)
-        .where(
-          and(
-            eq(userWarehousePermissions.userId, Number(targetUserId)),
-            eq(userWarehousePermissions.warehouseId, Number(warehouseId))
-          )
-        );
-
-      if (existing[0]) {
-        const [updated] = await db
-          .update(userWarehousePermissions)
-          .set({
-            canView: Boolean(canView),
-            canReceive: Boolean(canReceive),
-            canDispatch: Boolean(canDispatch),
-            canProduce: Boolean(canProduce),
-            canCount: Boolean(canCount),
-          })
-          .where(eq(userWarehousePermissions.id, existing[0].id))
-          .returning();
-        return res.json({ permission: updated });
-      } else {
-        const [inserted] = await db
-          .insert(userWarehousePermissions)
-          .values({
-            userId: Number(targetUserId),
-            warehouseId: Number(warehouseId),
-            canView: Boolean(canView),
-            canReceive: Boolean(canReceive),
-            canDispatch: Boolean(canDispatch),
-            canProduce: Boolean(canProduce),
-            canCount: Boolean(canCount),
-          })
-          .returning();
-        return res.json({ permission: inserted });
-      }
-    } catch (error: any) {
-      return res.status(400).json({ error: error.message });
-    }
-  });
-
-  app.post('/api/Verification/run-suite', requireAuth, async (req: AuthRequest, res) => {
+  app.post('/api/users', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({
-          error: 'Solo el Propietario o Administrador puede ejecutar la batería de pruebas de validación.',
+        return res.status(403).json({ error: 'Solo el Administrador puede crear usuarios.' });
+      }
+      const { username, password, fullName, role, warehouseId } = req.body;
+      if (!username || !password || !fullName) {
+        return res.status(400).json({ error: 'Complete usuario, contraseña y nombre completo.' });
+      }
+      const cleanU = String(username).trim().toLowerCase();
+      const [newUser] = await db
+        .insert(users)
+        .values({
+          uid: `local_${cleanU}_${Date.now()}`,
+          username: cleanU,
+          email: `${cleanU}@controlstock.bo`,
+          fullName: String(fullName).trim(),
+          role: role || 'WAREHOUSE_MANAGER',
+          passwordHash: hashPassword(String(password)),
+          isActive: true,
+          canViewPrivateCosts: role === 'OWNER',
+        })
+        .returning();
+
+      if (warehouseId) {
+        await db.insert(userWarehousePermissions).values({
+          userId: newUser.id,
+          warehouseId: Number(warehouseId),
+          canView: true,
+          canReceive: true,
+          canDispatch: true,
+          canProduce: true,
+          canCount: true,
+          canApproveAdjustments: role === 'OWNER',
         });
       }
-      const suiteReport = await runAutomatedVerificationSuite();
-      return res.json(suiteReport);
+
+      return res.json({ user: newUser });
     } catch (error: any) {
-      console.error('Error running verification suite:', error);
-      return res.status(500).json({ error: error.message || 'Fallo al ejecutar la suite de pruebas.' });
+      return res.status(400).json({ error: 'El nombre de usuario ya existe o los datos son inválidos.' });
     }
   });
 
-  app.get('/api/verification/audit', requireAuth, async (_req, res) => {
+  app.delete('/api/users/:id', requireAuth, async (req: AuthRequest, res) => {
     try {
-      const auditReport = await runAccountingInvariantAudit();
-      return res.json(auditReport);
+      const user = req.authUser!;
+      if (user.role !== 'OWNER') {
+        return res.status(403).json({ error: 'Solo el Propietario puede eliminar usuarios.' });
+      }
+      const targetId = Number(req.params.id);
+      if (targetId === user.id) {
+        return res.status(400).json({ error: 'No puede eliminar su propio usuario administrador.' });
+      }
+      await db
+        .delete(userWarehousePermissions)
+        .where(eq(userWarehousePermissions.userId, targetId));
+      await db.delete(users).where(eq(users.id, targetId));
+      return res.json({ deleted: true });
     } catch (error: any) {
-      return res.status(500).json({ error: error.message });
+      return res.status(400).json({ error: 'No se puede eliminar un usuario con historial de movimientos.' });
+    }
+  });
+
+  app.post('/api/admin/reset-inventory', requireAuth, requireOwnerPrivateAccess, async (_req, res) => {
+    try {
+      await resetAllInventoryToZeroForProduction();
+      return res.json({ reset: true });
+    } catch (error: any) {
+      return res.status(500).json({ error: 'No se pudo reiniciar el inventario.' });
     }
   });
 
   // =========================================================================
   // VITE MIDDLEWARE FOR DEV / STATIC ASSETS FOR PROD
   // =========================================================================
-  if (process.env.NODE_ENV !== 'production') {
+  const distPath = path.join(process.cwd(), 'dist');
+  const fs = await import('fs');
+  if (process.env.NODE_ENV === 'production' && fs.existsSync(path.join(distPath, 'index.html'))) {
+    app.use(express.static(distPath));
+    app.use((_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  } else {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {

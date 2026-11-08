@@ -3,269 +3,402 @@ import {
   Package,
   Search,
   Plus,
-  Layers,
-  Warehouse as WarehouseIcon,
-  CheckCircle2,
-  AlertTriangle,
+  Edit3,
+  Trash2,
   Camera,
-  Eye,
+  FolderKanban,
   ArrowDownToLine,
-  ArrowRightLeft,
+  Eye,
+  X,
+  Check,
+  Warehouse as WarehouseIcon,
+  ChevronsRight,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   WorkspaceData,
   Product,
-  Recipe,
+  ProductCategory,
+  Warehouse,
   formatInt,
   translateStatus,
+  translateAccountingType,
 } from '../types.ts';
 
 interface Props {
   data: WorkspaceData;
   isOnline: boolean;
+  initialSubView?: 'PRODUCTS' | 'CATEGORIES' | 'RECEIPTS' | 'WAREHOUSES';
   apiFetch: (url: string, options?: RequestInit) => Promise<any>;
   onRefresh: () => Promise<void>;
 }
 
-export function CatalogAndStockView({ data, isOnline, apiFetch, onRefresh }: Props) {
-  const [subTab, setSubTab] = useState<'STOCK' | 'INGRESO' | 'CATALOGO' | 'RECETAS' | 'ALMACENES'>('STOCK');
+export function CatalogAndStockView({
+  data,
+  isOnline,
+  initialSubView = 'PRODUCTS',
+  apiFetch,
+  onRefresh,
+}: Props) {
+  const [subView, setSubView] = useState<'PRODUCTS' | 'CATEGORIES' | 'RECEIPTS' | 'WAREHOUSES'>(
+    initialSubView
+  );
+  React.useEffect(() => {
+    setSubView(initialSubView);
+  }, [initialSubView]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | 'ALL'>('ALL');
-  const [selectedFamily, setSelectedFamily] = useState<string>('ALL');
-  const [zoomPhotoProduct, setZoomPhotoProduct] = useState<Product | null>(null);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  // Goods Receipt Form State
-  const [receiptWarehouseId, setReceiptWarehouseId] = useState<number>(
+  // =========================================================================
+  // 1. SIMPLIFIED PRODUCT MODAL STATE (Create & Edit)
+  // Only asks for: SKU, Descripción, Clasificación, Cantidad (optional on create), Fotografía
+  // =========================================================================
+  const [productModalOpen, setProductModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [prodSku, setProdSku] = useState('');
+  const [prodDescription, setProdDescription] = useState('');
+  const [prodCategoryName, setProdCategoryName] = useState(
+    data.categories[0]?.name || 'Cases'
+  );
+  const [prodInitialQty, setProdInitialQty] = useState<number>(0);
+  const [prodInitialWhId, setProdInitialWhId] = useState<number>(
     data.warehouses[0]?.id || 0
   );
-  const [receiptLocationId, setReceiptLocationId] = useState<number>(
-    data.locations.find((l) => l.warehouseId === data.warehouses[0]?.id)?.id || 0
-  );
-  const [receiptMovementType, setReceiptMovementType] = useState<'INGRESO_PROVEEDOR' | 'APERTURA_INICIAL'>('INGRESO_PROVEEDOR');
-  const [supplierOrContainer, setSupplierOrContainer] = useState('');
-  const [receiptNotes, setReceiptNotes] = useState('');
-  const [receiptProductId, setReceiptProductId] = useState<number>(
-    data.products[0]?.id || 0
-  );
-  const [receiptQuantity, setReceiptQuantity] = useState<number>(1000);
-  const [receiptInputMode, setReceiptInputMode] = useState<'UNITS' | 'BOXES'>('UNITS');
-  const [receiptBoxesCount, setReceiptBoxesCount] = useState<number>(1);
-  const [includePrivateCost, setIncludePrivateCost] = useState<boolean>(false);
-  const [fobCost, setFobCost] = useState<number>(0);
-  const [freightCost, setFreightCost] = useState<number>(0);
-  const [customsCost, setCustomsCost] = useState<number>(0);
-  const [otherCost, setOtherCost] = useState<number>(0);
-  const [receiptPreviewOpen, setReceiptPreviewOpen] = useState(false);
-  const [receiptIdempotencyKey, setReceiptIdempotencyKey] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [prodImageUrl, setProdImageUrl] = useState('');
+  const [deleteConfirmProduct, setDeleteConfirmProduct] = useState<Product | null>(null);
+  const [zoomPhotoProduct, setZoomPhotoProduct] = useState<Product | null>(null);
 
-  // New Product Modal State
-  const [newSku, setNewSku] = useState('');
-  const [newName, setNewName] = useState('');
-  const [newProductType, setNewProductType] = useState<Product['productType']>('SECONDARY_COMPONENT');
-  const [newFamily, setNewFamily] = useState('CASE');
-  const [newBrand, setNewBrand] = useState('');
-  const [newModel, setNewModel] = useState('');
-  const [newCapacity, setNewCapacity] = useState('8GB');
-  const [newColor, setNewColor] = useState('Negro');
-  const [newMaterial, setNewMaterial] = useState('Metal');
-  const [newUnitsPerBox, setNewUnitsPerBox] = useState(1000);
-  const [newMinStock, setNewMinStock] = useState(1000);
-  const [newImageUrl, setNewImageUrl] = useState('');
-  const [duplicateWarningData, setDuplicateWarningData] = useState<any | null>(null);
+  // Quick Add Stock Modal for an existing product
+  const [quickStockProduct, setQuickStockProduct] = useState<Product | null>(null);
+  const [quickStockQty, setQuickStockQty] = useState<number>(500);
+  const [quickStockWhId, setQuickStockWhId] = useState<number>(data.warehouses[0]?.id || 0);
+  const [quickStockSupplier, setQuickStockSupplier] = useState('');
+  const [quickIncludeCost, setQuickIncludeCost] = useState(false);
+  const [quickFobCost, setQuickFobCost] = useState<number>(0);
+  const [quickFreightCost, setQuickFreightCost] = useState<number>(0);
+  const [quickCustomsCost, setQuickCustomsCost] = useState<number>(0);
 
-  // New Recipe Form State
-  const [recCode, setRecCode] = useState('');
-  const [recName, setRecName] = useState('');
-  const [recFinishedId, setRecFinishedId] = useState<number>(
-    data.products.find((p) => p.productType === 'FINISHED_GOOD')?.id || 0
+  // =========================================================================
+  // 2. CLASSIFICATIONS / DEPARTMENTS CRUD STATE (Empaques, Cases, etc.)
+  // =========================================================================
+  const [catModalOpen, setCatModalOpen] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<ProductCategory | null>(null);
+  const [catName, setCatName] = useState('');
+  const [catAccType, setCatAccType] = useState<ProductCategory['accountingType']>(
+    'SECONDARY_COMPONENT'
   );
-  const [recComponents, setRecComponents] = useState<
-    { componentProductId: number; quantityPerUnit: number; isStrategicOrderBound: boolean }[]
-  >([]);
+  const [catDescription, setCatDescription] = useState('');
 
-  // New Location State
+  // =========================================================================
+  // 3. WAREHOUSES & LOCATIONS CRUD STATE + IPHONE SLIDE-TO-DELETE
+  // =========================================================================
+  const [whName, setWhName] = useState('');
+  const [whAddress, setWhAddress] = useState('');
+  const [whIsPlant, setWhIsPlant] = useState(false);
   const [locWhId, setLocWhId] = useState<number>(data.warehouses[0]?.id || 0);
-  const [locCode, setLocCode] = useState('');
   const [locZone, setLocZone] = useState('');
   const [locShelf, setLocShelf] = useState('');
 
-  // IDOR Security Test Trigger
-  const [idorTestStatus, setIdorTestStatus] = useState<string | null>(null);
+  // Slide-to-delete warehouse confirmation state
+  const [warehouseToDelete, setWarehouseToDelete] = useState<Warehouse | null>(null);
+  const [slideProgress, setSlideProgress] = useState<number>(0);
+  const [deletingWarehouse, setDeletingWarehouse] = useState<boolean>(false);
 
-  const isOwnerOrAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
+  const isAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
   const canViewCosts = data.user.role === 'OWNER' || data.user.canViewPrivateCosts;
 
-  const selectedReceiptProduct = data.products.find((p) => p.id === receiptProductId);
-  const effectiveReceiptUnits =
-    receiptInputMode === 'BOXES' && selectedReceiptProduct
-      ? receiptBoxesCount * selectedReceiptProduct.unitsPerBox
-      : receiptQuantity;
+  React.useEffect(() => {
+    setSubView(initialSubView);
+  }, [initialSubView]);
+
+  const openCreateProductModal = () => {
+    setEditingProduct(null);
+    setProdSku('');
+    setProdDescription('');
+    setProdCategoryName(data.categories[0]?.name || 'Empaques');
+    setProdInitialQty(0);
+    setProdInitialWhId(data.warehouses[0]?.id || 0);
+    setProdImageUrl('');
+    setProductModalOpen(true);
+  };
+
+  const openEditProductModal = (prod: Product) => {
+    setEditingProduct(prod);
+    setProdSku(prod.sku);
+    setProdDescription(prod.name);
+    setProdCategoryName(prod.family);
+    setProdInitialQty(0);
+    setProdImageUrl(prod.imageUrl);
+    setProductModalOpen(true);
+  };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 4 * 1024 * 1024) {
-      setFeedbackMsg({ type: 'error', text: 'La imagen no debe superar 4 MB.' });
+    if (file.size > 6 * 1024 * 1024) {
+      setFeedback({ type: 'error', text: 'La fotografía no debe superar 6 MB.' });
       return;
     }
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        setNewImageUrl(reader.result);
+        setProdImageUrl(reader.result);
       }
     };
     reader.readAsDataURL(file);
   };
 
-  const openReceiptPreview = () => {
-    if (!isOnline) {
-      setFeedbackMsg({
+  const handleSaveProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline) return;
+    if (!prodSku.trim() || !prodDescription.trim() || !prodCategoryName.trim()) {
+      setFeedback({
         type: 'error',
-        text: 'Sin conexión a Internet: las confirmaciones están bloqueadas.',
+        text: 'Complete el SKU, la descripción del producto y su clasificación.',
       });
       return;
     }
-    if (!receiptWarehouseId || !receiptLocationId || !receiptProductId || effectiveReceiptUnits <= 0) {
-      setFeedbackMsg({
-        type: 'error',
-        text: 'Seleccione almacén, ubicación, producto y una cantidad entera positiva.',
-      });
-      return;
+
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const matchedCat = data.categories.find((c) => c.name === prodCategoryName);
+      const accountingType = matchedCat?.accountingType || 'SECONDARY_COMPONENT';
+
+      if (editingProduct) {
+        await apiFetch(`/api/products/${editingProduct.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            sku: prodSku,
+            name: prodDescription,
+            family: prodCategoryName,
+            productType: accountingType,
+            imageUrl: prodImageUrl,
+          }),
+        });
+        setFeedback({
+          type: 'success',
+          text: `Producto "${prodDescription}" actualizado correctamente.`,
+        });
+      } else {
+        const defaultLoc = data.locations.find((l) => l.warehouseId === prodInitialWhId);
+        await apiFetch('/api/products', {
+          method: 'POST',
+          body: JSON.stringify({
+            sku: prodSku,
+            name: prodDescription,
+            family: prodCategoryName,
+            productType: accountingType,
+            imageUrl: prodImageUrl,
+            initialQuantity: prodInitialQty,
+            initialWarehouseId: prodInitialWhId,
+            initialLocationId: defaultLoc?.id,
+          }),
+        });
+        setFeedback({
+          type: 'success',
+          text:
+            prodInitialQty > 0
+              ? `Producto "${prodDescription}" creado con ${formatInt(prodInitialQty)} unidades iniciales.`
+              : `Producto "${prodDescription}" creado en el catálogo.`,
+        });
+      }
+      setProductModalOpen(false);
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
     }
-    setReceiptIdempotencyKey(`ING-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-    setReceiptPreviewOpen(true);
-    setFeedbackMsg(null);
   };
 
-  const confirmGoodsReceipt = async () => {
+  const handleDeleteProduct = async (prod: Product) => {
     if (!isOnline) return;
     setSubmitting(true);
-    setFeedbackMsg(null);
+    setFeedback(null);
+    try {
+      await apiFetch(`/api/products/${prod.id}`, {
+        method: 'DELETE',
+      });
+      setDeleteConfirmProduct(null);
+      setFeedback({
+        type: 'success',
+        text: `Producto "${prod.name}" (${prod.sku}) eliminado correctamente.`,
+      });
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleConfirmQuickStock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !quickStockProduct || quickStockQty <= 0) return;
+    const loc =
+      data.locations.find((l) => l.warehouseId === quickStockWhId) || data.locations[0];
+    if (!loc) {
+      setFeedback({ type: 'error', text: 'Seleccione un almacén con ubicación activa.' });
+      return;
+    }
+
+    setSubmitting(true);
+    setFeedback(null);
     try {
       const res = await apiFetch('/api/inventory/receipts', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: receiptIdempotencyKey,
-          movementType: receiptMovementType,
-          warehouseId: receiptWarehouseId,
-          locationId: receiptLocationId,
-          supplierOrContainer,
-          notes: receiptNotes,
+          idempotencyKey: `ING-QUICK-${quickStockProduct.id}-${Date.now()}`,
+          movementType: 'INGRESO_PROVEEDOR',
+          warehouseId: quickStockWhId,
+          locationId: loc.id,
+          supplierOrContainer: quickStockSupplier || 'Ingreso Directo a Almacén',
+          notes: `Ingreso de ${quickStockProduct.name}`,
           lines: [
             {
-              productId: receiptProductId,
-              quantity: effectiveReceiptUnits,
+              productId: quickStockProduct.id,
+              quantity: quickStockQty,
               privateCost:
-                canViewCosts && includePrivateCost
+                canViewCosts && quickIncludeCost
                   ? {
-                      fobTotalCost: fobCost,
-                      freightCost,
-                      customsPolicyCost: customsCost,
-                      otherImportExpenses: otherCost,
+                      fobTotalCost: quickFobCost,
+                      freightCost: quickFreightCost,
+                      customsPolicyCost: quickCustomsCost,
+                      otherImportExpenses: 0,
                       currency: 'USD',
-                      privateNotes: receiptNotes,
                     }
                   : undefined,
             },
           ],
         }),
       });
-      setReceiptPreviewOpen(false);
-      setSupplierOrContainer('');
-      setReceiptNotes('');
-      setFeedbackMsg({
+      setQuickStockProduct(null);
+      setQuickStockSupplier('');
+      setQuickIncludeCost(false);
+      setFeedback({
         type: 'success',
-        text: `Ingreso confirmado en servidor. Documento Folio: ${res.folio} (${formatInt(
-          effectiveReceiptUnits
-        )} unidades).`,
+        text: `Se sumaron +${formatInt(quickStockQty)} unidades a "${
+          quickStockProduct.name
+        }" (Comprobante ${res.folio}).`,
       });
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      setFeedback({ type: 'error', text: err.message });
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleCreateProduct = async (forceCreate = false) => {
-    if (!isOnline) return;
+  // Category CRUD Handlers
+  const openCreateCategoryModal = () => {
+    setEditingCategory(null);
+    setCatName('');
+    setCatAccType('SECONDARY_COMPONENT');
+    setCatDescription('');
+    setCatModalOpen(true);
+  };
+
+  const openEditCategoryModal = (cat: ProductCategory) => {
+    setEditingCategory(cat);
+    setCatName(cat.name);
+    setCatAccType(cat.accountingType);
+    setCatDescription(cat.description);
+    setCatModalOpen(true);
+  };
+
+  const handleSaveCategory = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !catName.trim()) return;
     setSubmitting(true);
-    setFeedbackMsg(null);
+    setFeedback(null);
     try {
-      await apiFetch('/api/products', {
-        method: 'POST',
-        body: JSON.stringify({
-          sku: newSku,
-          name: newName,
-          productType: newProductType,
-          family: newFamily,
-          brand: newBrand,
-          model: newModel,
-          capacity: newCapacity,
-          color: newColor,
-          material: newMaterial,
-          unitsPerBox: newUnitsPerBox,
-          minStockAlert: newMinStock,
-          imageUrl: newImageUrl,
-          forceCreateDespiteDuplicateWarning: forceCreate,
-        }),
-      });
-      setDuplicateWarningData(null);
-      setNewSku('');
-      setNewName('');
-      setFeedbackMsg({
-        type: 'success',
-        text: 'Producto registrado correctamente en el catálogo maestro.',
-      });
-      await onRefresh();
-    } catch (err: any) {
-      if (err.warningDuplicate) {
-        setDuplicateWarningData(err);
+      if (editingCategory) {
+        await apiFetch(`/api/categories/${editingCategory.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            name: catName,
+            accountingType: catAccType,
+            description: catDescription,
+          }),
+        });
+        setFeedback({
+          type: 'success',
+          text: `Clasificación "${catName}" actualizada.`,
+        });
       } else {
-        setFeedbackMsg({ type: 'error', text: err.message });
+        await apiFetch('/api/categories', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: catName,
+            accountingType: catAccType,
+            description: catDescription,
+          }),
+        });
+        setFeedback({
+          type: 'success',
+          text: `Clasificación "${catName}" creada correctamente.`,
+        });
       }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleCreateRecipe = async () => {
-    if (!isOnline) return;
-    if (!recCode || !recName || !recFinishedId || recComponents.length === 0) {
-      setFeedbackMsg({
-        type: 'error',
-        text: 'Complete código, nombre, producto terminado y al menos un componente en la receta.',
-      });
-      return;
-    }
-    setSubmitting(true);
-    try {
-      await apiFetch('/api/recipes', {
-        method: 'POST',
-        body: JSON.stringify({
-          code: recCode,
-          name: recName,
-          finishedProductId: recFinishedId,
-          changeReason: 'Creada desde panel de recetas',
-          components: recComponents,
-        }),
-      });
-      setRecCode('');
-      setRecName('');
-      setRecComponents([]);
-      setFeedbackMsg({ type: 'success', text: 'Receta (BOM) registrada y activada.' });
+      setCatModalOpen(false);
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      setFeedback({ type: 'error', text: err.message });
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleCreateLocation = async () => {
-    if (!isOnline || !locWhId || !locCode || !locZone || !locShelf) return;
+  const handleDeleteCategory = async (cat: ProductCategory) => {
+    if (!isOnline) return;
+    setSubmitting(true);
+    try {
+      await apiFetch(`/api/categories/${cat.id}`, { method: 'DELETE' });
+      setFeedback({
+        type: 'success',
+        text: `Clasificación "${cat.name}" eliminada.`,
+      });
+      if (selectedCategory === cat.name) setSelectedCategory('ALL');
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleCreateWarehouse = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !whName.trim()) return;
+    setSubmitting(true);
+    try {
+      await apiFetch('/api/warehouses', {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'WAREHOUSE',
+          name: whName,
+          address: whAddress,
+          description: whIsPlant ? 'Planta / Taller de Producción' : 'Almacén de Mercancía',
+          isProductionPlant: whIsPlant,
+        }),
+      });
+      setWhName('');
+      setWhAddress('');
+      setFeedback({ type: 'success', text: `Almacén "${whName}" creado.` });
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleCreateLocation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !locWhId || !locZone.trim() || !locShelf.trim()) return;
     setSubmitting(true);
     try {
       await apiFetch('/api/warehouses', {
@@ -273,128 +406,105 @@ export function CatalogAndStockView({ data, isOnline, apiFetch, onRefresh }: Pro
         body: JSON.stringify({
           type: 'LOCATION',
           warehouseId: locWhId,
-          code: locCode,
           zoneName: locZone,
           shelfName: locShelf,
         }),
       });
-      setLocCode('');
       setLocZone('');
       setLocShelf('');
-      setFeedbackMsg({ type: 'success', text: 'Nueva ubicación/estante creada.' });
+      setFeedback({ type: 'success', text: 'Ubicación / Estante añadido al almacén.' });
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      setFeedback({ type: 'error', text: err.message });
     } finally {
       setSubmitting(false);
     }
   };
 
-  const triggerIdorAttempt = async (unauthorizedWarehouseId: number) => {
+  const openDeleteWarehouseModal = (wh: Warehouse) => {
+    setWarehouseToDelete(wh);
+    setSlideProgress(0);
+    setDeletingWarehouse(false);
+  };
+
+  const executeWarehouseDeletion = async (wh: Warehouse) => {
+    if (!isOnline || deletingWarehouse) return;
+    setDeletingWarehouse(true);
     try {
-      await apiFetch(`/api/workspace?warehouseId=${unauthorizedWarehouseId}`);
-      setIdorTestStatus('Acceso permitido');
+      await apiFetch(`/api/warehouses/${wh.id}`, { method: 'DELETE' });
+      setFeedback({
+        type: 'success',
+        text: `Almacén "${wh.name}" y sus ubicaciones fueron eliminados permanentemente.`,
+      });
+      if (selectedWarehouseId === wh.id) {
+        setSelectedWarehouseId('ALL');
+      }
+      setWarehouseToDelete(null);
+      setSlideProgress(0);
+      await onRefresh();
     } catch (err: any) {
-      setIdorTestStatus(err.message);
+      setFeedback({ type: 'error', text: err.message });
+      setSlideProgress(0);
+    } finally {
+      setDeletingWarehouse(false);
     }
   };
 
-  // Filtered products & balances
+  const handleSlideChange = (val: number) => {
+    if (deletingWarehouse || !warehouseToDelete) return;
+    setSlideProgress(val);
+    if (val >= 96) {
+      setSlideProgress(100);
+      executeWarehouseDeletion(warehouseToDelete);
+    }
+  };
+
+  const handleSlideRelease = () => {
+    if (deletingWarehouse) return;
+    if (slideProgress < 96) {
+      setSlideProgress(0);
+    }
+  };
+
+  const handleDeleteLocation = async (locId: number, shelfName: string) => {
+    if (!isOnline) return;
+    setSubmitting(true);
+    try {
+      await apiFetch(`/api/warehouses/locations/${locId}`, { method: 'DELETE' });
+      setFeedback({ type: 'success', text: `Estante "${shelfName}" eliminado.` });
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const filteredProducts = data.products.filter((p) => {
     const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
       !q ||
       p.sku.toLowerCase().includes(q) ||
       p.name.toLowerCase().includes(q) ||
-      p.brand.toLowerCase().includes(q) ||
-      p.model.toLowerCase().includes(q) ||
-      p.capacity.toLowerCase().includes(q);
-    const matchesFamily = selectedFamily === 'ALL' || p.family === selectedFamily;
-    return matchesSearch && matchesFamily;
+      p.family.toLowerCase().includes(q);
+    const matchesCat = selectedCategory === 'ALL' || p.family === selectedCategory;
+    return matchesSearch && matchesCat;
   });
-
-  const unauthorizedWarehouses = data.allWarehousesSummary.filter(
-    (w) => !data.warehouses.some((vw) => vw.id === w.id)
-  );
 
   return (
     <div className="space-y-6">
-      {/* Sub-navigation bar */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 pb-4">
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg">
-          <button
-            onClick={() => setSubTab('STOCK')}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              subTab === 'STOCK'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Existencias por Almacén y Estado
-          </button>
-          <button
-            onClick={() => setSubTab('INGRESO')}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              subTab === 'INGRESO'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Registrar Ingreso de Proveedor / Contenedor
-          </button>
-          <button
-            onClick={() => setSubTab('CATALOGO')}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              subTab === 'CATALOGO'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Catálogo Maestro de SKUs y Fotos
-          </button>
-          <button
-            onClick={() => setSubTab('RECETAS')}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              subTab === 'RECETAS'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Recetas de Ensamblaje (BOM)
-          </button>
-          <button
-            onClick={() => setSubTab('ALMACENES')}
-            className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-              subTab === 'ALMACENES'
-                ? 'bg-white text-slate-900 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Almacenes y Ubicaciones
-          </button>
-        </div>
-
-        {/* Warehouse Scope Indicator */}
-        <div className="text-xs text-slate-600">
-          Almacenes autorizados para su usuario:{' '}
-          <span className="font-semibold text-slate-900">
-            {data.warehouses.map((w) => w.name).join(' · ') || 'Ninguno'}
-          </span>
-        </div>
-      </div>
-
-      {feedbackMsg && (
+      {feedback && (
         <div
-          className={`p-4 rounded-lg border text-sm flex items-center justify-between ${
-            feedbackMsg.type === 'success'
+          className={`p-4 rounded-xl border text-sm flex items-center justify-between ${
+            feedback.type === 'success'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
               : 'bg-red-50 border-red-200 text-red-900'
           }`}
         >
-          <span>{feedbackMsg.text}</span>
+          <span className="font-medium">{feedback.text}</span>
           <button
-            onClick={() => setFeedbackMsg(null)}
-            className="text-xs font-medium underline ml-4"
+            onClick={() => setFeedback(null)}
+            className="text-xs font-semibold underline ml-4"
           >
             Cerrar
           </button>
@@ -402,25 +512,24 @@ export function CatalogAndStockView({ data, isOnline, apiFetch, onRefresh }: Pro
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 1: EXISTENCIAS POR ALMACÉN, UBICACIÓN Y ESTADO                    */}
+      {/* SUBVIEW 1: PRODUCTOS Y EXISTENCIAS (TARJETAS GRANDES Y SIMPLES)       */}
       {/* ===================================================================== */}
-      {subTab === 'STOCK' && (
-        <div className="space-y-5">
-          {/* Search & Filter Bar */}
-          <div className="bg-white p-4 rounded-lg border border-slate-200 flex flex-wrap items-center gap-4">
-            <div className="relative flex-1 min-w-[240px]">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+      {subView === 'PRODUCTS' && (
+        <div className="space-y-6">
+          {/* Top Action & Search Header */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Buscar por SKU, nombre, marca, modelo o capacidad (ej. UDP 8GB, HP, Adaptador)..."
-                className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-sky-600"
+                placeholder="Buscar producto por SKU, descripción o departamento..."
+                className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600"
               />
             </div>
 
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-slate-600">Almacén:</label>
+            <div className="flex flex-wrap items-center gap-3">
               <select
                 value={selectedWarehouseId}
                 onChange={(e) =>
@@ -428,262 +537,347 @@ export function CatalogAndStockView({ data, isOnline, apiFetch, onRefresh }: Pro
                     e.target.value === 'ALL' ? 'ALL' : Number(e.target.value)
                   )
                 }
-                className="text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
+                className="text-sm border border-slate-300 rounded-lg px-3.5 py-2.5 bg-white font-medium text-slate-700"
               >
-                <option value="ALL">Todos los autorizados ({data.warehouses.length})</option>
+                <option value="ALL">Todos los Almacenes ({data.warehouses.length})</option>
                 {data.warehouses.map((w) => (
                   <option key={w.id} value={w.id}>
-                    {w.name} ({w.code})
+                    Almacén: {w.name}
                   </option>
                 ))}
               </select>
-            </div>
 
-            <div className="flex items-center gap-2">
-              <label className="text-xs font-medium text-slate-600">Familia:</label>
-              <select
-                value={selectedFamily}
-                onChange={(e) => setSelectedFamily(e.target.value)}
-                className="text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-              >
-                <option value="ALL">Todas las familias</option>
-                <option value="UDP">Chips UDP</option>
-                <option value="MICROSD">Memorias microSD</option>
-                <option value="ADAPTADOR">Adaptadores SD</option>
-                <option value="CASE">Cases USB</option>
-                <option value="EMPAQUE">Kits de Empaque (Papel+Blíster)</option>
-                <option value="USB_TERMINADO">USB Terminados</option>
-                <option value="MICROSD_TERMINADA">microSD Terminadas</option>
-              </select>
+              {isAdmin && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSubView('CATEGORIES')}
+                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                  >
+                    <FolderKanban className="w-4 h-4" />
+                    Clasificaciones ({data.categories.length})
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={openCreateProductModal}
+                    className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Nuevo Producto
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
-          {/* IDOR Verification Strip for Non-Global Staff */}
-          {unauthorizedWarehouses.length > 0 && (
-            <div className="bg-slate-100 border border-slate-200 rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="text-xs text-slate-700">
-                <span className="font-semibold text-slate-900">
-                  Control de Aislamiento por Almacén (Caso E):
-                </span>{' '}
-                Su usuario no tiene acceso a:{' '}
-                {unauthorizedWarehouses.map((u) => u.name).join(', ')}. Puede comprobar que el
-                servidor bloquea consultas forzadas por ID:
+          {/* Interactive Classification Filter Tabs */}
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+            <button
+              onClick={() => setSelectedCategory('ALL')}
+              className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                selectedCategory === 'ALL'
+                  ? 'bg-slate-900 text-white'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Todos ({data.products.length})
+            </button>
+            {data.categories.map((cat) => {
+              const count = data.products.filter((p) => p.family === cat.name).length;
+              return (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategory(cat.name)}
+                  className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                    selectedCategory === cat.name
+                      ? 'bg-slate-900 text-white'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {cat.name} ({count})
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Empty State when Inventory starts at 0 */}
+          {filteredProducts.length === 0 ? (
+            <div className="bg-white rounded-xl border border-slate-200 p-12 text-center max-w-xl mx-auto my-6 space-y-4">
+              <div className="w-12 h-12 rounded-full bg-sky-50 text-sky-600 flex items-center justify-center mx-auto">
+                <Package className="w-6 h-6" />
               </div>
-              <div className="flex items-center gap-2">
-                {unauthorizedWarehouses.map((uw) => (
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-900">
+                  {data.products.length === 0
+                    ? 'Tu inventario está limpio y listo para empezar'
+                    : 'No se encontraron productos con ese filtro'}
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  {data.products.length === 0
+                    ? 'Registra tus primeros componentes o productos (por ejemplo: Chips UDP, Cases, Empaques o Memorias microSD) con su SKU, descripción, clasificación, cantidad y fotografía.'
+                    : 'Prueba cambiando el término de búsqueda o seleccionando otra clasificación.'}
+                </p>
+              </div>
+              {isAdmin && (
+                <div className="flex items-center justify-center gap-3 pt-2">
                   <button
-                    key={uw.id}
-                    onClick={() => triggerIdorAttempt(uw.id)}
-                    className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 text-slate-800 rounded-md hover:bg-slate-50 whitespace-nowrap shrink-0"
+                    type="button"
+                    onClick={openCreateProductModal}
+                    className="px-5 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg inline-flex items-center gap-2"
                   >
-                    Probar lectura forzada de {uw.name}
+                    <Plus className="w-4 h-4" />
+                    Crear Primer Producto
                   </button>
-                ))}
-              </div>
-              {idorTestStatus && (
-                <div className="w-full text-xs font-mono text-red-700 bg-red-50 border border-red-200 rounded px-3 py-1.5">
-                  Respuesta del Servidor: {idorTestStatus} (Intento registrado en Auditoría de Seguridad)
+                  <button
+                    type="button"
+                    onClick={() => setSubView('CATEGORIES')}
+                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                  >
+                    Configurar Clasificaciones
+                  </button>
                 </div>
               )}
             </div>
-          )}
-
-          {/* Responsive Cards & Table of Balances by Product */}
-          <div className="grid grid-cols-1 gap-4">
-            {filteredProducts.map((product) => {
-              const prodBalances = data.balances.filter(
-                (b) =>
-                  b.productId === product.id &&
-                  (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
-              );
-
-              const availableSum = prodBalances
-                .filter((b) => b.status === 'AVAILABLE')
-                .reduce((acc, b) => acc + b.quantity, 0);
-              const reservedSum = prodBalances
-                .filter((b) => b.status === 'RESERVED_ORDER')
-                .reduce((acc, b) => acc + b.quantity, 0);
-              const inProductionSum = prodBalances
-                .filter(
+          ) : (
+            /* Clean Visual Product Cards Grid */
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+              {filteredProducts.map((product) => {
+                const prodBalances = data.balances.filter(
                   (b) =>
-                    b.status === 'IN_PRODUCTION_CUSTODY' ||
-                    b.status === 'IN_TRANSIT_PRODUCTION'
-                )
-                .reduce((acc, b) => acc + b.quantity, 0);
-              const finishedPendingSum = prodBalances
-                .filter(
-                  (b) =>
-                    b.status === 'FINISHED_PENDING_PICKUP' ||
-                    b.status === 'FINISHED_IN_TRANSIT'
-                )
-                .reduce((acc, b) => acc + b.quantity, 0);
-              const discrepancySum = prodBalances
-                .filter((b) => b.status === 'DISCREPANCY_HOLD')
-                .reduce((acc, b) => acc + b.quantity, 0);
+                    b.productId === product.id &&
+                    (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+                );
 
-              const isLowStock =
-                product.productType !== 'FINISHED_GOOD' &&
-                availableSum > 0 &&
-                availableSum <= product.minStockAlert;
+                const availableQty = prodBalances
+                  .filter((b) => b.status === 'AVAILABLE')
+                  .reduce((s, b) => s + b.quantity, 0);
+                const inProductionQty = prodBalances
+                  .filter(
+                    (b) =>
+                      b.status === 'IN_PRODUCTION_CUSTODY' ||
+                      b.status === 'IN_TRANSIT_PRODUCTION' ||
+                      b.status === 'RESERVED_ORDER'
+                  )
+                  .reduce((s, b) => s + b.quantity, 0);
+                const pendingPickupQty = prodBalances
+                  .filter(
+                    (b) =>
+                      b.status === 'FINISHED_PENDING_PICKUP' ||
+                      b.status === 'FINISHED_IN_TRANSIT'
+                  )
+                  .reduce((s, b) => s + b.quantity, 0);
 
-              return (
-                <div
-                  key={product.id}
-                  className="bg-white rounded-lg border border-slate-200 p-4 transition-colors hover:border-slate-300"
-                >
-                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                    {/* Left: Thumbnail & Metadata */}
-                    <div className="flex items-start gap-4">
-                      <button
-                        type="button"
+                return (
+                  <div
+                    key={product.id}
+                    className="bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col justify-between transition-colors hover:border-slate-300"
+                  >
+                    <div>
+                      {/* Large Legible Product Photo Header */}
+                      <div
                         onClick={() => setZoomPhotoProduct(product)}
-                        className="relative w-20 h-16 rounded-md overflow-hidden border border-slate-200 bg-slate-900 shrink-0 group"
-                        title="Ampliar fotografía"
+                        className="relative h-44 bg-slate-900 cursor-pointer group overflow-hidden border-b border-slate-100"
                       >
                         {product.imageUrl ? (
                           <img
                             src={product.imageUrl}
                             alt={product.name}
                             referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                           />
                         ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-400">
-                            <Package className="w-6 h-6" />
+                          <div className="w-full h-full flex items-center justify-center text-slate-500">
+                            <Package className="w-10 h-10" />
                           </div>
                         )}
-                        <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
-                          <Eye className="w-4 h-4 text-white" />
-                        </span>
-                      </button>
-
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                          <span className="font-mono font-semibold text-slate-800">
-                            {product.sku}
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <span>{product.family}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{product.brand}</span>
-                          {product.capacity !== 'N/A' && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span className="font-semibold text-slate-700">
-                                {product.capacity}
-                              </span>
-                            </>
-                          )}
-                          {product.material !== 'N/A' && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span>{product.material}</span>
-                            </>
-                          )}
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent flex items-end justify-between p-3.5">
+                          <div className="text-xs font-mono font-bold text-white">
+                            SKU: {product.sku}
+                          </div>
+                          <div className="text-xs font-medium text-sky-300">
+                            {product.family}
+                          </div>
                         </div>
-                        <h3 className="text-base font-semibold text-slate-900 mt-0.5">
+                      </div>
+
+                      {/* Product Description & Balances */}
+                      <div className="p-4 space-y-3">
+                        <h3 className="text-base font-bold text-slate-900 leading-snug">
                           {product.name}
                         </h3>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Conversión: 1 caja = {formatInt(product.unitsPerBox)}{' '}
-                          {product.unitName} · Alerta mínimo: {formatInt(product.minStockAlert)} u.
-                          {isLowStock && (
-                            <span className="ml-2 text-amber-700 font-semibold">
-                              (Stock bajo el nivel mínimo de reposición)
-                            </span>
-                          )}
-                        </p>
-                      </div>
-                    </div>
 
-                    {/* Right: Non-duplicated State Breakdown (Tabular Numerals) */}
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 pt-3 lg:pt-0 border-t lg:border-t-0 border-slate-100">
-                      <div className="text-right px-3 py-1.5 bg-slate-50 rounded">
-                        <div className="text-[11px] text-slate-500">Disponible Libre</div>
-                        <div className="text-base font-mono font-bold text-emerald-700 tabular-nums">
-                          {formatInt(availableSum)}
+                        <div className="grid grid-cols-3 gap-2 pt-1">
+                          <div className="p-2.5 bg-slate-50 rounded-lg">
+                            <div className="text-[11px] text-slate-500">Disponible</div>
+                            <div className="text-base font-mono font-bold text-emerald-700 tabular-nums">
+                              {formatInt(availableQty)}
+                            </div>
+                          </div>
+                          <div className="p-2.5 bg-slate-50 rounded-lg">
+                            <div className="text-[11px] text-slate-500">En Producción</div>
+                            <div className="text-base font-mono font-semibold text-sky-700 tabular-nums">
+                              {formatInt(inProductionQty)}
+                            </div>
+                          </div>
+                          <div className="p-2.5 bg-slate-50 rounded-lg">
+                            <div className="text-[11px] text-slate-500">Por Recoger</div>
+                            <div className="text-base font-mono font-semibold text-indigo-700 tabular-nums">
+                              {formatInt(pendingPickupQty)}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                      <div className="text-right px-3 py-1.5 bg-slate-50 rounded">
-                        <div className="text-[11px] text-slate-500">Reservado OP</div>
-                        <div className="text-base font-mono font-semibold text-amber-700 tabular-nums">
-                          {formatInt(reservedSum)}
-                        </div>
-                      </div>
-                      <div className="text-right px-3 py-1.5 bg-slate-50 rounded">
-                        <div className="text-[11px] text-slate-500">Custodia Prod.</div>
-                        <div className="text-base font-mono font-semibold text-sky-700 tabular-nums">
-                          {formatInt(inProductionSum)}
-                        </div>
-                      </div>
-                      <div className="text-right px-3 py-1.5 bg-slate-50 rounded">
-                        <div className="text-[11px] text-slate-500">Terminado p/ Retiro</div>
-                        <div className="text-base font-mono font-semibold text-indigo-700 tabular-nums">
-                          {formatInt(finishedPendingSum)}
-                        </div>
-                      </div>
-                      <div className="text-right px-3 py-1.5 bg-slate-50 rounded">
-                        <div className="text-[11px] text-slate-500">En Discrepancia</div>
-                        <div
-                          className={`text-base font-mono font-semibold tabular-nums ${
-                            discrepancySum > 0 ? 'text-red-600' : 'text-slate-400'
-                          }`}
-                        >
-                          {formatInt(discrepancySum)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
 
-                  {/* Detailed Physical Locations Breakdown */}
-                  {prodBalances.length > 0 && (
-                    <div className="mt-3 pt-3 border-t border-slate-100">
-                      <div className="text-xs font-medium text-slate-600 mb-2">
-                        Desglose exacto por Almacén, Sección/Estante y Custodia:
-                      </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs text-left">
-                          <thead>
-                            <tr className="text-slate-500 border-b border-slate-100">
-                              <th className="py-1.5 pr-3 font-medium">Almacén</th>
-                              <th className="py-1.5 px-3 font-medium">Ubicación Física (Sección / Estante)</th>
-                              <th className="py-1.5 px-3 font-medium">Estado / Custodia</th>
-                              <th className="py-1.5 px-3 font-medium">Orden Vinculada</th>
-                              <th className="py-1.5 pl-3 text-right font-medium">Cantidad (Piezas)</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-100">
-                            {prodBalances.map((bal) => {
-                              const wh = data.warehouses.find((w) => w.id === bal.warehouseId);
-                              const loc = data.locations.find((l) => l.id === bal.locationId);
-                              const ord = data.productionOrders.find(
-                                (o) => o.id === bal.productionOrderId
-                              );
+                        {/* Warehouse Breakdown */}
+                        {prodBalances.length > 0 ? (
+                          <div className="pt-2 border-t border-slate-100 space-y-1 text-xs">
+                            <div className="text-[11px] font-medium text-slate-500">
+                              Ubicación actual del stock:
+                            </div>
+                            {prodBalances.map((b) => {
+                              const wh = data.warehouses.find((w) => w.id === b.warehouseId);
+                              const loc = data.locations.find((l) => l.id === b.locationId);
                               return (
-                                <tr key={bal.id} className="hover:bg-slate-50">
-                                  <td className="py-1.5 pr-3 font-medium text-slate-900">
-                                    {wh?.name || `Almacén #${bal.warehouseId}`}
-                                  </td>
-                                  <td className="py-1.5 px-3 text-slate-600">
-                                    {loc
-                                      ? `${loc.zoneName} › ${loc.shelfName} (${loc.code})`
-                                      : `Ubicación #${bal.locationId}`}
-                                  </td>
-                                  <td className="py-1.5 px-3 font-medium text-slate-800">
-                                    {translateStatus(bal.status)}
-                                  </td>
-                                  <td className="py-1.5 px-3 font-mono text-slate-600">
-                                    {ord ? ord.orderNumber : 'Libre / General'}
-                                  </td>
-                                  <td className="py-1.5 pl-3 text-right font-mono font-semibold text-slate-900 tabular-nums">
-                                    {formatInt(bal.quantity)}
-                                  </td>
-                                </tr>
+                                <div
+                                  key={b.id}
+                                  className="flex items-center justify-between text-slate-700 py-0.5"
+                                >
+                                  <span className="truncate pr-2">
+                                    <strong>{wh?.name}</strong> ({loc?.zoneName}) ·{' '}
+                                    <span className="text-slate-500">
+                                      {translateStatus(b.status)}
+                                    </span>
+                                  </span>
+                                  <span className="font-mono font-bold text-slate-900 tabular-nums shrink-0">
+                                    {formatInt(b.quantity)} u.
+                                  </span>
+                                </div>
                               );
                             })}
-                          </tbody>
-                        </table>
+                          </div>
+                        ) : (
+                          <div className="pt-2 border-t border-slate-100 text-xs text-slate-400">
+                            Sin existencias registradas todavía (0 unidades).
+                          </div>
+                        )}
                       </div>
+                    </div>
+
+                    {/* Card Footer Actions: Add Stock, Edit, Delete */}
+                    <div className="px-4 py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setQuickStockProduct(product);
+                          setQuickStockQty(500);
+                          setQuickStockWhId(data.warehouses[0]?.id || 0);
+                        }}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      >
+                        <ArrowDownToLine className="w-3.5 h-3.5" />
+                        Ingresar Stock
+                      </button>
+
+                      {isAdmin && (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditProductModal(product)}
+                            className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-md flex items-center gap-1"
+                            title="Editar producto"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            Editar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDeleteConfirmProduct(product)}
+                            className="p-1.5 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-md"
+                            title="Eliminar producto"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SUBVIEW 2: GESTOR DE CLASIFICACIONES / DEPARTAMENTOS                  */}
+      {/* ===================================================================== */}
+      {subView === 'CATEGORIES' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">
+                Clasificaciones y Departamentos de Productos
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Crea, edita o elimina los departamentos de tu inventario (por ejemplo:{' '}
+                <strong>Empaques</strong>, <strong>Cases</strong>, <strong>Chips UDP</strong>,{' '}
+                <strong>Memorias microSD</strong>, <strong>Adaptadores</strong> o nuevos
+                departamentos).
+              </p>
+            </div>
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={openCreateCategoryModal}
+                className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" />
+                Nueva Clasificación / Departamento
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {data.categories.map((cat) => {
+              const countProds = data.products.filter((p) => p.family === cat.name).length;
+              return (
+                <div
+                  key={cat.id}
+                  className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between gap-4"
+                >
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-base font-bold text-slate-900">{cat.name}</h3>
+                      <span className="text-xs font-mono text-slate-500">
+                        {countProds} productos
+                      </span>
+                    </div>
+                    <div className="text-xs font-medium text-sky-700 mt-1">
+                      {translateAccountingType(cat.accountingType)}
+                    </div>
+                    {cat.description && (
+                      <p className="text-xs text-slate-600 mt-2">{cat.description}</p>
+                    )}
+                  </div>
+
+                  {isAdmin && (
+                    <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openEditCategoryModal(cat)}
+                        className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteCategory(cat)}
+                        className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-md flex items-center gap-1"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Eliminar
+                      </button>
                     </div>
                   )}
                 </div>
@@ -694,924 +888,795 @@ export function CatalogAndStockView({ data, isOnline, apiFetch, onRefresh }: Pro
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 2: INGRESO DE MERCANCÍA DE PROVEEDOR O CONTENEDOR                 */}
+      {/* SUBVIEW 3: CONFIGURACIÓN DE ALMACENES Y UBICACIONES                   */}
       {/* ===================================================================== */}
-      {subTab === 'INGRESO' && (
-        <div className="bg-white rounded-lg border border-slate-200 p-6 max-w-4xl">
-          <h2 className="text-lg font-semibold text-slate-900">
-            01. Recepción e Ingreso de Mercancía (Proveedor / Contenedor)
-          </h2>
-          <p className="text-xs text-slate-600 mt-1">
-            Todo ingreso confirmado genera un folio único del servidor, incrementa el saldo de forma
-            atómica y queda registrado en el libro mayor inmutable.
-          </p>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+      {subView === 'WAREHOUSES' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Tipo de Documento de Ingreso
-              </label>
-              <select
-                value={receiptMovementType}
-                onChange={(e) => setReceiptMovementType(e.target.value as any)}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
+              <h2 className="text-lg font-bold text-slate-900">
+                Gestión de Almacenes y Estantes
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Crea nuevos almacenes o elimina almacenes existentes con confirmación deslizante de seguridad.
+              </p>
+            </div>
+            <div className="text-xs font-mono font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
+              {data.warehouses.length} almacenes activos
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {data.warehouses.map((w) => {
+              const locs = data.locations.filter((l) => l.warehouseId === w.id);
+              const stockInWh = data.balances
+                .filter((b) => b.warehouseId === w.id)
+                .reduce((acc, b) => acc + b.quantity, 0);
+
+              return (
+                <div
+                  key={w.id}
+                  className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between gap-4 shadow-xs"
+                >
+                  <div>
+                    <div className="flex items-center justify-between text-xs text-slate-500">
+                      <span className="font-mono font-bold text-slate-800">{w.code}</span>
+                      <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-medium">
+                        {w.isProductionPlant ? 'Planta / Taller Producción' : 'Almacén Físico'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between mt-1.5">
+                      <h3 className="text-base font-bold text-slate-900">{w.name}</h3>
+                      <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md">
+                        {formatInt(stockInWh)} uds.
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-600 mt-1">{w.description}</p>
+                    {w.address && (
+                      <p className="text-[11px] text-slate-400 mt-0.5">📍 {w.address}</p>
+                    )}
+
+                    <div className="mt-4 pt-3 border-t border-slate-100">
+                      <div className="text-xs font-semibold text-slate-700 mb-2">
+                        Secciones / Estantes ({locs.length}):
+                      </div>
+                      <ul className="space-y-1.5 text-xs">
+                        {locs.map((l) => (
+                          <li
+                            key={l.id}
+                            className="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between gap-2"
+                          >
+                            <span className="truncate">
+                              {l.zoneName} › <strong>{l.shelfName}</strong>
+                            </span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="font-mono text-[10px] text-slate-400">{l.code}</span>
+                              {isAdmin && locs.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteLocation(l.id, l.shelfName)}
+                                  title="Eliminar estante"
+                                  className="p-1 text-slate-400 hover:text-red-600 rounded cursor-pointer"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+
+                  {isAdmin && (
+                    <div className="pt-3 border-t border-slate-100 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => openDeleteWarehouseModal(w)}
+                        className="w-full py-2 px-3 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Eliminar Almacén...
+                      </button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {isAdmin && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <form
+                onSubmit={handleCreateWarehouse}
+                className="bg-white rounded-xl border border-slate-200 p-5 space-y-4"
               >
-                <option value="INGRESO_PROVEEDOR">Ingreso de Proveedor / Contenedor</option>
-                <option value="APERTURA_INICIAL">Movimiento de Apertura Inicial Auditada</option>
-              </select>
+                <h3 className="text-sm font-bold text-slate-900">Crear Nuevo Almacén</h3>
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Nombre del Almacén
+                    </label>
+                    <input
+                      type="text"
+                      value={whName}
+                      onChange={(e) => setWhName(e.target.value)}
+                      placeholder="Ej. Almacén Central / Planta 2"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Dirección o Referencia
+                    </label>
+                    <input
+                      type="text"
+                      value={whAddress}
+                      onChange={(e) => setWhAddress(e.target.value)}
+                      placeholder="Ubicación física"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={whIsPlant}
+                      onChange={(e) => setWhIsPlant(e.target.checked)}
+                    />
+                    Este almacén funciona como Taller de Producción / Ensamblaje
+                  </label>
+                </div>
+                <button
+                  type="submit"
+                  disabled={submitting || !isOnline}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                >
+                  Guardar Almacén
+                </button>
+              </form>
+
+              <form
+                onSubmit={handleCreateLocation}
+                className="bg-white rounded-xl border border-slate-200 p-5 space-y-4"
+              >
+                <h3 className="text-sm font-bold text-slate-900">
+                  Agregar Sección / Estante a un Almacén
+                </h3>
+                <div className="space-y-3 text-xs">
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">Almacén</label>
+                    <select
+                      value={locWhId}
+                      onChange={(e) => setLocWhId(Number(e.target.value))}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                    >
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Sección o Cuarto (Ej. Sección K / Cuarto de Empaques)
+                    </label>
+                    <input
+                      type="text"
+                      value={locZone}
+                      onChange={(e) => setLocZone(e.target.value)}
+                      placeholder="Sección K"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Estante o Casillero (Ej. Estante 2)
+                    </label>
+                    <input
+                      type="text"
+                      value={locShelf}
+                      onChange={(e) => setLocShelf(e.target.value)}
+                      placeholder="Estante 2"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
+                      required
+                    />
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={submitting || !isOnline}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800"
+                >
+                  Agregar Ubicación
+                </button>
+              </form>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL SIMPLIFICADO: CREAR O EDITAR PRODUCTO (Solo 5 Campos Claros)    */}
+      {/* ===================================================================== */}
+      {productModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-lg w-full p-6 space-y-5 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-base font-bold text-slate-900">
+                {editingProduct ? 'Editar Producto' : 'Crear Nuevo Producto'}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setProductModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Proveedor / Referencia de Contenedor o Póliza
-              </label>
-              <input
-                type="text"
-                value={supplierOrContainer}
-                onChange={(e) => setSupplierOrContainer(e.target.value)}
-                placeholder="Ej. Contenedor Shenzhen #402 / Proveedor Local"
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-              />
-            </div>
+            <form onSubmit={handleSaveProduct} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  1. SKU / Código del Producto *
+                </label>
+                <input
+                  type="text"
+                  value={prodSku}
+                  onChange={(e) => setProdSku(e.target.value.toUpperCase())}
+                  placeholder="Ej. UDP-8GB, CASE-HP-METAL, EMP-HP-8G"
+                  className="w-full text-sm font-mono border border-slate-300 rounded-lg px-3 py-2.5"
+                  required
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Almacén Destino Autorizado
-              </label>
-              <select
-                value={receiptWarehouseId}
-                onChange={(e) => {
-                  const wId = Number(e.target.value);
-                  setReceiptWarehouseId(wId);
-                  const firstLoc = data.locations.find((l) => l.warehouseId === wId);
-                  if (firstLoc) setReceiptLocationId(firstLoc.id);
-                }}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-              >
-                {data.warehouses.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name} ({w.code})
-                  </option>
-                ))}
-              </select>
-            </div>
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  2. Descripción del Producto *
+                </label>
+                <input
+                  type="text"
+                  value={prodDescription}
+                  onChange={(e) => setProdDescription(e.target.value)}
+                  placeholder="Ej. Case Metálico HP 8GB / Empaque Blíster HP 8GB"
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5"
+                  required
+                />
+              </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Ubicación Física (Sección / Cuarto / Estante)
-              </label>
-              <select
-                value={receiptLocationId}
-                onChange={(e) => setReceiptLocationId(Number(e.target.value))}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-              >
-                {data.locations
-                  .filter((l) => l.warehouseId === receiptWarehouseId)
-                  .map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.zoneName} › {l.shelfName} ({l.code})
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  3. Clasificación / Departamento *
+                </label>
+                <select
+                  value={prodCategoryName}
+                  onChange={(e) => setProdCategoryName(e.target.value)}
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                >
+                  {data.categories.map((cat) => (
+                    <option key={cat.id} value={cat.name}>
+                      {cat.name}
                     </option>
                   ))}
-              </select>
-            </div>
+                </select>
+              </div>
 
-            <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Producto / Componente a Ingresar (SKU)
-              </label>
-              <select
-                value={receiptProductId}
-                onChange={(e) => setReceiptProductId(Number(e.target.value))}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white font-mono"
-              >
-                {data.products.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.sku} — {p.name} ({p.brand} · {p.capacity})
-                  </option>
-                ))}
-              </select>
-            </div>
+              {/* Initial Quantity only when creating a new product */}
+              {!editingProduct && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-lg border border-slate-200">
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1">
+                      4. Cantidad Inicial (Opcional)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={prodInitialQty}
+                      onChange={(e) =>
+                        setProdInitialQty(Math.max(0, parseInt(e.target.value || '0', 10)))
+                      }
+                      className="w-full text-sm font-mono font-bold border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-800 mb-1">
+                      Almacén donde se encuentra
+                    </label>
+                    <select
+                      value={prodInitialWhId}
+                      onChange={(e) => setProdInitialWhId(Number(e.target.value))}
+                      className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                    >
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Modo de Captura de Cantidad
-              </label>
-              <div className="flex items-center gap-2">
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1.5">
+                  {editingProduct ? '4. Fotografía del Producto' : '5. Fotografía del Producto'}
+                </label>
+                <div className="flex items-center gap-4">
+                  <label className="px-4 py-2.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg cursor-pointer flex items-center gap-2 border border-slate-300">
+                    <Camera className="w-4 h-4" />
+                    Subir Foto o Tomar con Cámara
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handlePhotoUpload}
+                      className="hidden"
+                    />
+                  </label>
+                  {prodImageUrl && (
+                    <img
+                      src={prodImageUrl}
+                      alt="Vista previa"
+                      className="w-20 h-14 object-cover rounded-lg border border-slate-300"
+                    />
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setReceiptInputMode('UNITS')}
-                  className={`px-3 py-2 text-xs font-medium rounded-md border ${
-                    receiptInputMode === 'UNITS'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-700 border-slate-300'
-                  }`}
+                  onClick={() => setProductModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
                 >
-                  Por Piezas Enteras
+                  Cancelar
                 </button>
                 <button
-                  type="button"
-                  onClick={() => setReceiptInputMode('BOXES')}
-                  className={`px-3 py-2 text-xs font-medium rounded-md border ${
-                    receiptInputMode === 'BOXES'
-                      ? 'bg-slate-900 text-white border-slate-900'
-                      : 'bg-white text-slate-700 border-slate-300'
-                  }`}
+                  type="submit"
+                  disabled={submitting || !isOnline}
+                  className="px-5 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg"
                 >
-                  Por Cajas Cerradas (1 caja = {formatInt(selectedReceiptProduct?.unitsPerBox || 1000)} pzs)
+                  {submitting
+                    ? 'Guardando...'
+                    : editingProduct
+                    ? 'Guardar Cambios'
+                    : 'Crear Producto'}
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL: INGRESO RÁPIDO DE STOCK PARA UN PRODUCTO                       */}
+      {/* ===================================================================== */}
+      {quickStockProduct && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div>
+                <span className="text-xs font-mono font-bold text-sky-700">
+                  {quickStockProduct.sku}
+                </span>
+                <h3 className="text-base font-bold text-slate-900">
+                  Ingresar Mercancía: {quickStockProduct.name}
+                </h3>
+              </div>
+              <button
+                onClick={() => setQuickStockProduct(null)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                {receiptInputMode === 'UNITS'
-                  ? 'Cantidad Exacta en Piezas'
-                  : 'Cantidad de Cajas Cerradas'}
-              </label>
-              {receiptInputMode === 'UNITS' ? (
+            <form onSubmit={handleConfirmQuickStock} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Cantidad a Ingresar (Unidades) *
+                </label>
                 <input
                   type="number"
                   min={1}
                   step={1}
-                  value={receiptQuantity}
-                  onChange={(e) => setReceiptQuantity(Math.max(1, parseInt(e.target.value || '0', 10)))}
-                  className="w-full text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
+                  value={quickStockQty}
+                  onChange={(e) =>
+                    setQuickStockQty(Math.max(1, parseInt(e.target.value || '0', 10)))
+                  }
+                  className="w-full text-base font-mono font-bold border border-slate-300 rounded-lg px-3 py-2"
+                  required
                 />
-              ) : (
-                <div className="flex items-center gap-3">
-                  <input
-                    type="number"
-                    min={1}
-                    step={1}
-                    value={receiptBoxesCount}
-                    onChange={(e) =>
-                      setReceiptBoxesCount(Math.max(1, parseInt(e.target.value || '1', 10)))
-                    }
-                    className="w-32 text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
-                  />
-                  <span className="text-xs font-mono text-slate-700">
-                    = {formatInt(effectiveReceiptUnits)} piezas enteras
-                  </span>
-                </div>
-              )}
-            </div>
+              </div>
 
-            <div className="md:col-span-2">
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Observaciones / Estado de Cajas o Lote
-              </label>
-              <input
-                type="text"
-                value={receiptNotes}
-                onChange={(e) => setReceiptNotes(e.target.value)}
-                placeholder="Observaciones de recepción física"
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-              />
-            </div>
-
-            {/* Optional Private Landed Cost Section (Visible ONLY to OWNER) */}
-            {canViewCosts && (
-              <div className="md:col-span-2 pt-4 border-t border-slate-200">
-                <label className="flex items-center gap-2 text-xs font-semibold text-slate-900 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includePrivateCost}
-                    onChange={(e) => setIncludePrivateCost(e.target.checked)}
-                    className="rounded border-slate-300"
-                  />
-                  Registrar Costos Privados de Importación/Compra para este Lote (Exclusivo Propietario — Oculto al Personal)
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Almacén de Destino *
                 </label>
-
-                {includePrivateCost && (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 p-3.5 bg-slate-50 rounded-md border border-slate-200">
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-1">
-                        Costo FOB Total (USD)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={fobCost}
-                        onChange={(e) => setFobCost(Number(e.target.value))}
-                        className="w-full text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5 bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-1">
-                        Transporte / Flete (USD)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={freightCost}
-                        onChange={(e) => setFreightCost(Number(e.target.value))}
-                        className="w-full text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5 bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-1">
-                        Póliza / Aduana (USD)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={customsCost}
-                        onChange={(e) => setCustomsCost(Number(e.target.value))}
-                        className="w-full text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5 bg-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-1">
-                        Otros Gastos (USD)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        value={otherCost}
-                        onChange={(e) => setOtherCost(Number(e.target.value))}
-                        className="w-full text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5 bg-white"
-                      />
-                    </div>
-                    <div className="col-span-2 sm:col-span-4 text-xs font-mono text-slate-800 pt-1">
-                      Costo Total Puesto en Almacén: USD{' '}
-                      {(fobCost + freightCost + customsCost + otherCost).toFixed(2)} · Costo Unitario
-                      Calculado: USD{' '}
-                      {effectiveReceiptUnits > 0
-                        ? (
-                            (fobCost + freightCost + customsCost + otherCost) /
-                            effectiveReceiptUnits
-                          ).toFixed(4)
-                        : '0.0000'}{' '}
-                      / pieza
-                    </div>
-                  </div>
-                )}
+                <select
+                  value={quickStockWhId}
+                  onChange={(e) => setQuickStockWhId(Number(e.target.value))}
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                >
+                  {data.warehouses.map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
               </div>
-            )}
-          </div>
 
-          <div className="mt-6 flex items-center justify-end gap-3">
-            <button
-              type="button"
-              disabled={!isOnline}
-              onClick={openReceiptPreview}
-              className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 rounded-md hover:bg-sky-700 disabled:opacity-50 transition-colors flex items-center gap-2"
-            >
-              <ArrowDownToLine className="w-4 h-4" />
-              Revisar y Confirmar Ingreso
-            </button>
-          </div>
-
-          {/* Preview & Idempotent Confirmation Box */}
-          {receiptPreviewOpen && selectedReceiptProduct && (
-            <div className="mt-6 p-5 bg-slate-50 border border-slate-300 rounded-lg space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Resumen de Verificación Antes de Confirmar en Servidor
-                </h3>
-                <span className="text-xs font-mono text-slate-500">
-                  Clave Idempotencia: {receiptIdempotencyKey}
-                </span>
-              </div>
-              <div className="flex items-center gap-4">
-                <img
-                  src={selectedReceiptProduct.imageUrl}
-                  alt={selectedReceiptProduct.name}
-                  referrerPolicy="no-referrer"
-                  className="w-20 h-14 object-cover rounded border border-slate-200"
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Proveedor / Referencia (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={quickStockSupplier}
+                  onChange={(e) => setQuickStockSupplier(e.target.value)}
+                  placeholder="Ej. Contenedor #10 / Compra Local"
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
                 />
-                <div className="text-xs space-y-1">
-                  <div className="font-semibold text-slate-900">
-                    {selectedReceiptProduct.sku} — {selectedReceiptProduct.name}
-                  </div>
-                  <div className="text-slate-600">
-                    Cantidad a sumar atómicamente:{' '}
-                    <span className="font-mono font-bold text-emerald-700">
-                      +{formatInt(effectiveReceiptUnits)} piezas
-                    </span>
-                  </div>
-                  <div className="text-slate-600">
-                    Destino:{' '}
-                    {data.warehouses.find((w) => w.id === receiptWarehouseId)?.name} ›{' '}
-                    {data.locations.find((l) => l.id === receiptLocationId)?.zoneName} ›{' '}
-                    {data.locations.find((l) => l.id === receiptLocationId)?.shelfName}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setReceiptPreviewOpen(false)}
-                  className="px-3 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-md"
-                >
-                  Modificar Datos
-                </button>
-                <button
-                  type="button"
-                  disabled={submitting || !isOnline}
-                  onClick={confirmGoodsReceipt}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 rounded-md hover:bg-emerald-700 disabled:opacity-50"
-                >
-                  {submitting ? 'Confirmando en Servidor...' : 'Confirmar Ingreso Definitivo'}
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ===================================================================== */}
-      {/* TAB 3: CATÁLOGO MAESTRO DE PRODUCTOS Y FOTOGRAFÍAS                    */}
-      {/* ===================================================================== */}
-      {subTab === 'CATALOGO' && (
-        <div className="space-y-6">
-          {isOwnerOrAdmin ? (
-            <div className="bg-white rounded-lg border border-slate-200 p-6">
-              <h2 className="text-base font-semibold text-slate-900">
-                Alta de Nuevo SKU en Catálogo Maestro (Con Detector de Duplicados y Fotografía)
-              </h2>
-              <p className="text-xs text-slate-600 mt-1">
-                Los kits de empaque (papel + blíster) se registran como un solo SKU. El adaptador SD
-                universal y los chips UDP se registran como SKUs independientes.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Código SKU Único
-                  </label>
-                  <input
-                    type="text"
-                    value={newSku}
-                    onChange={(e) => setNewSku(e.target.value.toUpperCase())}
-                    placeholder="Ej. CASE-HP-GOMA-16G"
-                    className="w-full text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Nombre Descriptivo del Producto / Componente
-                  </label>
-                  <input
-                    type="text"
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    placeholder="Ej. Case USB Goma Azul modelo v250"
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Clasificación Contable
-                  </label>
-                  <select
-                    value={newProductType}
-                    onChange={(e) => setNewProductType(e.target.value as any)}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-                  >
-                    <option value="STRATEGIC_COMPONENT">Componente Estratégico (UDP / microSD)</option>
-                    <option value="SECONDARY_COMPONENT">Componente Específico (Case USB)</option>
-                    <option value="PACKAGING_KIT">Kit de Empaque (Papel + Blíster junto)</option>
-                    <option value="UNIVERSAL_ACCESSORY">Accesorio Universal (Adaptador SD)</option>
-                    <option value="FINISHED_GOOD">Producto Terminado Empaquetado</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Familia</label>
-                  <select
-                    value={newFamily}
-                    onChange={(e) => setNewFamily(e.target.value)}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-                  >
-                    <option value="UDP">UDP</option>
-                    <option value="MICROSD">MICROSD</option>
-                    <option value="ADAPTADOR">ADAPTADOR</option>
-                    <option value="CASE">CASE</option>
-                    <option value="EMPAQUE">EMPAQUE</option>
-                    <option value="USB_TERMINADO">USB_TERMINADO</option>
-                    <option value="MICROSD_TERMINADA">MICROSD_TERMINADA</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Marca</label>
-                  <input
-                    type="text"
-                    value={newBrand}
-                    onChange={(e) => setNewBrand(e.target.value)}
-                    placeholder="Ej. HP, Sony, Samsung, Kingston"
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Modelo</label>
-                  <input
-                    type="text"
-                    value={newModel}
-                    onChange={(e) => setNewModel(e.target.value)}
-                    placeholder="Ej. v220w, Bar Plus"
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Capacidad</label>
-                  <select
-                    value={newCapacity}
-                    onChange={(e) => setNewCapacity(e.target.value)}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-                  >
-                    <option value="N/A">N/A (No aplica)</option>
-                    <option value="8GB">8 GB</option>
-                    <option value="16GB">16 GB</option>
-                    <option value="32GB">32 GB</option>
-                    <option value="64GB">64 GB</option>
-                    <option value="128GB">128 GB</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Color</label>
-                  <input
-                    type="text"
-                    value={newColor}
-                    onChange={(e) => setNewColor(e.target.value)}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Material</label>
-                  <select
-                    value={newMaterial}
-                    onChange={(e) => setNewMaterial(e.target.value)}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white"
-                  >
-                    <option value="Metal">Metal</option>
-                    <option value="Plástico">Plástico</option>
-                    <option value="Goma">Goma</option>
-                    <option value="Papel+Blíster">Papel + Blíster</option>
-                    <option value="Silicio">Silicio</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Unidades por Caja
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={newUnitsPerBox}
-                    onChange={(e) => setNewUnitsPerBox(Number(e.target.value))}
-                    className="w-full text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Alerta Stock Mínimo
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={newMinStock}
-                    onChange={(e) => setNewMinStock(Number(e.target.value))}
-                    className="w-full text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-
-                <div className="sm:col-span-3 flex flex-wrap items-center justify-between gap-4 pt-2">
-                  <div className="flex items-center gap-3">
-                    <label className="px-3 py-2 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-md cursor-pointer flex items-center gap-2 border border-slate-300">
-                      <Camera className="w-4 h-4" />
-                      Tomar Foto / Subir Imagen (Android o PC)
-                      <input
-                        type="file"
-                        accept="image/*"
-                        capture="environment"
-                        onChange={handlePhotoUpload}
-                        className="hidden"
-                      />
-                    </label>
-                    {newImageUrl && (
-                      <img
-                        src={newImageUrl}
-                        alt="Vista previa"
-                        className="w-16 h-12 object-cover rounded border border-slate-300"
-                      />
-                    )}
-                  </div>
-
-                  <button
-                    type="button"
-                    disabled={submitting || !isOnline}
-                    onClick={() => handleCreateProduct(false)}
-                    className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 disabled:opacity-50"
-                  >
-                    Guardar Producto en Catálogo
-                  </button>
-                </div>
               </div>
 
-              {duplicateWarningData && (
-                <div className="mt-4 p-4 bg-amber-50 border border-amber-300 rounded-md flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-xs text-amber-900">
-                    <strong>Advertencia de posible duplicado:</strong> {duplicateWarningData.error}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleCreateProduct(true)}
-                    className="px-3 py-1.5 text-xs font-semibold bg-amber-700 text-white rounded"
-                  >
-                    Confirmar creación de todos modos
-                  </button>
+              {canViewCosts && (
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={quickIncludeCost}
+                      onChange={(e) => setQuickIncludeCost(e.target.checked)}
+                    />
+                    Agregar Costo Privado de Compra (Solo visible para Administrador)
+                  </label>
+                  {quickIncludeCost && (
+                    <div className="grid grid-cols-3 gap-2 pt-1">
+                      <div>
+                        <label className="block text-[11px] text-slate-500">FOB Total ($)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={quickFobCost}
+                          onChange={(e) => setQuickFobCost(Number(e.target.value))}
+                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500">Flete ($)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={quickFreightCost}
+                          onChange={(e) => setQuickFreightCost(Number(e.target.value))}
+                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500">Póliza ($)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.01"
+                          value={quickCustomsCost}
+                          onChange={(e) => setQuickCustomsCost(Number(e.target.value))}
+                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
-          ) : (
-            <div className="bg-slate-100 border border-slate-200 rounded-lg p-4 text-xs text-slate-700">
-              Modo de consulta: Los trabajadores operativos pueden ver las fotografías y códigos SKU
-              para evitar errores de modelo o color, pero solo el Propietario/Administrador puede
-              modificar el catálogo maestro.
-            </div>
-          )}
-        </div>
-      )}
 
-      {/* ===================================================================== */}
-      {/* TAB 4: RECETAS DE ENSAMBLAJE VERSIONADAS (BOM)                        */}
-      {/* ===================================================================== */}
-      {subTab === 'RECETAS' && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {data.recipes.map((rec) => {
-              const finProd = data.products.find((p) => p.id === rec.finishedProductId);
-              return (
-                <div
-                  key={rec.id}
-                  className="bg-white rounded-lg border border-slate-200 p-5 flex flex-col justify-between"
-                >
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span className="font-mono font-semibold text-slate-800">{rec.code}</span>
-                      <span>Versión activa: v{rec.versionNumber} (Inmutable en historial)</span>
-                    </div>
-                    <h3 className="text-sm font-semibold text-slate-900 mt-1">{rec.name}</h3>
-                    {finProd && (
-                      <div className="mt-2 flex items-center gap-3 p-2.5 bg-slate-50 rounded border border-slate-200">
-                        <img
-                          src={finProd.imageUrl}
-                          alt={finProd.name}
-                          referrerPolicy="no-referrer"
-                          className="w-14 h-10 object-cover rounded"
-                        />
-                        <div className="text-xs">
-                          <div className="text-slate-500">Producto Terminado que Genera:</div>
-                          <div className="font-mono font-semibold text-emerald-800">
-                            {finProd.sku} — {finProd.name}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="mt-3">
-                      <div className="text-xs font-medium text-slate-700 mb-1.5">
-                        Componentes consumidos por cada 1 unidad fabricada:
-                      </div>
-                      <ul className="space-y-1.5 text-xs">
-                        {rec.components.map((c) => {
-                          const compProd = data.products.find(
-                            (p) => p.id === c.componentProductId
-                          );
-                          return (
-                            <li
-                              key={c.id}
-                              className="flex items-center justify-between py-1 px-2 bg-slate-50 rounded"
-                            >
-                              <div>
-                                <span className="font-mono font-medium text-slate-900">
-                                  {compProd?.sku}
-                                </span>{' '}
-                                — {compProd?.name}
-                              </div>
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className="text-[11px] text-slate-500">
-                                  {c.isStrategicOrderBound
-                                    ? 'De Custodia OP'
-                                    : 'De Stock Local Taller'}
-                                </span>
-                                <span className="font-mono font-bold text-slate-900">
-                                  {c.quantityPerUnit} u.
-                                </span>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {isOwnerOrAdmin && (
-            <div className="bg-white rounded-lg border border-slate-200 p-6">
-              <h3 className="text-base font-semibold text-slate-900">
-                Crear Nueva Receta de Ensamblaje (BOM)
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Código de Receta
-                  </label>
-                  <input
-                    type="text"
-                    value={recCode}
-                    onChange={(e) => setRecCode(e.target.value.toUpperCase())}
-                    placeholder="Ej. REC-USB-HP-16G"
-                    className="w-full text-sm font-mono border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Nombre de Receta
-                  </label>
-                  <input
-                    type="text"
-                    value={recName}
-                    onChange={(e) => setRecName(e.target.value)}
-                    placeholder="Ej. Ensamblaje USB HP 16GB"
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    SKU Producto Terminado Objetivo
-                  </label>
-                  <select
-                    value={recFinishedId}
-                    onChange={(e) => setRecFinishedId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 bg-white font-mono"
-                  >
-                    {data.products
-                      .filter((p) => p.productType === 'FINISHED_GOOD')
-                      .map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.sku} — {p.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="mt-4">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs font-medium text-slate-700">
-                    Lista de Materiales (BOM) por 1 unidad terminada:
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setRecComponents([
-                        ...recComponents,
-                        {
-                          componentProductId: data.products[0]?.id || 1,
-                          quantityPerUnit: 1,
-                          isStrategicOrderBound: false,
-                        },
-                      ])
-                    }
-                    className="px-3 py-1 text-xs font-medium bg-slate-100 hover:bg-slate-200 text-slate-800 rounded"
-                  >
-                    + Añadir Componente
-                  </button>
-                </div>
-
-                {recComponents.map((rc, idx) => (
-                  <div key={idx} className="flex flex-wrap items-center gap-3 mb-2">
-                    <select
-                      value={rc.componentProductId}
-                      onChange={(e) => {
-                        const copy = [...recComponents];
-                        copy[idx].componentProductId = Number(e.target.value);
-                        setRecComponents(copy);
-                      }}
-                      className="flex-1 text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5 bg-white"
-                    >
-                      {data.products
-                        .filter((p) => p.productType !== 'FINISHED_GOOD')
-                        .map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.sku} — {p.name}
-                          </option>
-                        ))}
-                    </select>
-                    <input
-                      type="number"
-                      min={1}
-                      value={rc.quantityPerUnit}
-                      onChange={(e) => {
-                        const copy = [...recComponents];
-                        copy[idx].quantityPerUnit = Math.max(1, Number(e.target.value));
-                        setRecComponents(copy);
-                      }}
-                      className="w-20 text-xs font-mono border border-slate-300 rounded px-2.5 py-1.5"
-                    />
-                    <label className="flex items-center gap-1.5 text-xs text-slate-700">
-                      <input
-                        type="checkbox"
-                        checked={rc.isStrategicOrderBound}
-                        onChange={(e) => {
-                          const copy = [...recComponents];
-                          copy[idx].isStrategicOrderBound = e.target.checked;
-                          setRecComponents(copy);
-                        }}
-                      />
-                      Componente Estratégico de Orden (UDP/microSD)
-                    </label>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-4 flex justify-end">
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  disabled={submitting || !isOnline}
-                  onClick={handleCreateRecipe}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800"
+                  onClick={() => setQuickStockProduct(null)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
                 >
-                  Guardar Receta Versionada
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting || !isOnline}
+                  className="px-5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg"
+                >
+                  {submitting ? 'Confirmando...' : 'Confirmar Ingreso'}
                 </button>
               </div>
-            </div>
-          )}
+            </form>
+          </div>
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 5: ALMACENES, SECCIONES Y ESTANTES                                */}
+      {/* MODAL: CREAR O EDITAR CLASIFICACIÓN / DEPARTAMENTO                    */}
       {/* ===================================================================== */}
-      {subTab === 'ALMACENES' && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {data.warehouses.map((w) => {
-              const whLocs = data.locations.filter((l) => l.warehouseId === w.id);
-              return (
-                <div key={w.id} className="bg-white rounded-lg border border-slate-200 p-5">
-                  <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span className="font-mono font-semibold text-slate-800">{w.code}</span>
-                    <span>{w.isProductionPlant ? 'Planta / Taller Producción' : 'Almacén Custodia'}</span>
-                  </div>
-                  <h3 className="text-base font-semibold text-slate-900 mt-1">{w.name}</h3>
-                  <p className="text-xs text-slate-600 mt-0.5">{w.description}</p>
-                  <p className="text-xs text-slate-500 mt-1">{w.address}</p>
-
-                  <div className="mt-4 pt-3 border-t border-slate-100">
-                    <div className="text-xs font-medium text-slate-700 mb-2">
-                      Ubicaciones internas configuradas ({whLocs.length}):
-                    </div>
-                    <ul className="space-y-1.5 text-xs">
-                      {whLocs.map((l) => (
-                        <li
-                          key={l.id}
-                          className="p-2 bg-slate-50 rounded border border-slate-100 flex items-center justify-between"
-                        >
-                          <div>
-                            <div className="font-medium text-slate-800">
-                              {l.zoneName} › {l.shelfName}
-                            </div>
-                            <div className="font-mono text-[11px] text-slate-500">{l.code}</div>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {isOwnerOrAdmin && (
-            <div className="bg-white rounded-lg border border-slate-200 p-5 max-w-2xl">
-              <h3 className="text-sm font-semibold text-slate-900">
-                Agregar Nueva Sección / Estante a un Almacén
+      {catModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-base font-bold text-slate-900">
+                {editingCategory
+                  ? 'Editar Clasificación / Departamento'
+                  : 'Nueva Clasificación / Departamento'}
               </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">Almacén</label>
-                  <select
-                    value={locWhId}
-                    onChange={(e) => setLocWhId(Number(e.target.value))}
-                    className="w-full text-xs border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Código Corto Ubicación
-                  </label>
-                  <input
-                    type="text"
-                    value={locCode}
-                    onChange={(e) => setLocCode(e.target.value.toUpperCase())}
-                    placeholder="Ej. SEN-SECK-EST3"
-                    className="w-full text-xs font-mono border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Sección / Cuarto / Habitación
-                  </label>
-                  <input
-                    type="text"
-                    value={locZone}
-                    onChange={(e) => setLocZone(e.target.value)}
-                    placeholder="Ej. Sección K - Cuarto de Empaques"
-                    className="w-full text-xs border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-700 mb-1">
-                    Estante / Casillero
-                  </label>
-                  <input
-                    type="text"
-                    value={locShelf}
-                    onChange={(e) => setLocShelf(e.target.value)}
-                    placeholder="Ej. Estante 3"
-                    className="w-full text-xs border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
+              <button
+                onClick={() => setCatModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveCategory} className="space-y-4 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Nombre de la Clasificación / Departamento *
+                </label>
+                <input
+                  type="text"
+                  value={catName}
+                  onChange={(e) => setCatName(e.target.value)}
+                  placeholder="Ej. Empaques, Cases, Chips UDP, Blísteres..."
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                  required
+                />
               </div>
-              <div className="mt-3 flex justify-end">
+
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Comportamiento en Producción y Stock *
+                </label>
+                <select
+                  value={catAccType}
+                  onChange={(e) => setCatAccType(e.target.value as any)}
+                  className="w-full text-xs border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                >
+                  <option value="SECONDARY_COMPONENT">
+                    Insumo / Componente de Taller (Ej. Cases, Accesorios)
+                  </option>
+                  <option value="PACKAGING_KIT">
+                    Empaque / Blíster (Se descuenta al fabricar)
+                  </option>
+                  <option value="STRATEGIC_COMPONENT">
+                    Componente Principal por Orden (Ej. Chips UDP, Memorias microSD)
+                  </option>
+                  <option value="UNIVERSAL_ACCESSORY">
+                    Accesorio Universal (Ej. Adaptador SD)
+                  </option>
+                  <option value="FINISHED_GOOD">
+                    Producto Terminado Final (Ej. USB o microSD empaquetada)
+                  </option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Descripción Breve (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={catDescription}
+                  onChange={(e) => setCatDescription(e.target.value)}
+                  placeholder="Descripción del departamento"
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  disabled={submitting || !isOnline}
-                  onClick={handleCreateLocation}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800"
+                  onClick={() => setCatModalOpen(false)}
+                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
                 >
-                  Crear Ubicación
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting || !isOnline}
+                  className="px-5 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg"
+                >
+                  Guardar Clasificación
                 </button>
               </div>
-            </div>
-          )}
+            </form>
+          </div>
         </div>
       )}
 
-      {/* Modal to Zoom Product Photo */}
+      {/* ===================================================================== */}
+      {/* MODAL: CONFIRMAR ELIMINACIÓN DE PRODUCTO                              */}
+      {/* ===================================================================== */}
+      {deleteConfirmProduct && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
+            <h3 className="text-base font-bold text-slate-900">
+              ¿Eliminar el producto "{deleteConfirmProduct.name}"?
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Se eliminará el SKU <strong>{deleteConfirmProduct.sku}</strong> y sus saldos asociados
+              del catálogo.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmProduct(null)}
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => handleDeleteProduct(deleteConfirmProduct)}
+                className="px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg"
+              >
+                {submitting ? 'Eliminando...' : 'Sí, Eliminar Producto'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL: AMPLIAR FOTOGRAFÍA                                             */}
+      {/* ===================================================================== */}
       {zoomPhotoProduct && (
         <div
-          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
           onClick={() => setZoomPhotoProduct(null)}
         >
           <div
-            className="bg-white rounded-lg max-w-lg w-full p-5 space-y-4"
+            className="bg-white rounded-xl max-w-lg w-full p-5 space-y-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between">
               <div>
-                <span className="font-mono text-xs font-semibold text-slate-600">
-                  {zoomPhotoProduct.sku}
+                <span className="font-mono text-xs font-bold text-sky-700">
+                  SKU: {zoomPhotoProduct.sku} · {zoomPhotoProduct.family}
                 </span>
-                <h3 className="text-base font-semibold text-slate-900">
-                  {zoomPhotoProduct.name}
-                </h3>
+                <h3 className="text-base font-bold text-slate-900">{zoomPhotoProduct.name}</h3>
               </div>
               <button
                 onClick={() => setZoomPhotoProduct(null)}
-                className="text-xs font-medium text-slate-600 hover:text-slate-900"
+                className="p-1 text-slate-500 hover:text-slate-900"
               >
-                Cerrar [X]
+                <X className="w-5 h-5" />
               </button>
             </div>
             <img
               src={zoomPhotoProduct.imageUrl}
               alt={zoomPhotoProduct.name}
               referrerPolicy="no-referrer"
-              className="w-full h-64 object-contain bg-slate-950 rounded-md border border-slate-200"
+              className="w-full h-72 object-contain bg-slate-950 rounded-lg border border-slate-200"
             />
-            <div className="text-xs text-slate-600 flex flex-wrap gap-3">
-              <span>Marca: {zoomPhotoProduct.brand}</span>
-              <span>·</span>
-              <span>Modelo: {zoomPhotoProduct.model}</span>
-              <span>·</span>
-              <span>Capacidad: {zoomPhotoProduct.capacity}</span>
-              <span>·</span>
-              <span>Material: {zoomPhotoProduct.material}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL ESTILO IPHONE: DESLIZAR PARA CONFIRMAR ELIMINACIÓN DE ALMACÉN   */}
+      {/* ===================================================================== */}
+      {warehouseToDelete && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl border border-red-200">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-6 h-6" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-red-600">
+                    Confirmación de Seguridad
+                  </span>
+                  <h3 className="text-lg font-bold text-slate-900 leading-tight">
+                    Eliminar Almacén "{warehouseToDelete.name}"
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={deletingWarehouse}
+                onClick={() => {
+                  setWarehouseToDelete(null);
+                  setSlideProgress(0);
+                }}
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {(() => {
+              const totalUnits = data.balances
+                .filter((b) => b.warehouseId === warehouseToDelete.id)
+                .reduce((acc, b) => acc + b.quantity, 0);
+              const totalLocs = data.locations.filter(
+                (l) => l.warehouseId === warehouseToDelete.id
+              ).length;
+
+              return (
+                <div className="p-4 rounded-xl bg-red-50 border border-red-200 space-y-2 text-xs text-red-950">
+                  <p className="font-bold text-red-800">
+                    ⚠️ Atención: Esta acción es irreversible
+                  </p>
+                  <p className="leading-relaxed text-red-900/90">
+                    Al eliminar el almacén <strong>{warehouseToDelete.name}</strong> ({warehouseToDelete.code}), se borrarán sus{' '}
+                    <strong>{totalLocs} secciones/estantes</strong> y se perderán las{' '}
+                    <strong>{formatInt(totalUnits)} unidades de productos</strong> registradas en él.
+                  </p>
+                </div>
+              );
+            })()}
+
+            {/* iPhone-style Slide to Unlock / Confirm Track */}
+            <div className="space-y-2 pt-1">
+              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500 text-center">
+                Desliza el botón rojo hasta el final para confirmar
+              </label>
+
+              <div className="relative h-14 w-full rounded-full bg-slate-900 border-2 border-red-500/40 p-1.5 overflow-hidden select-none shadow-inner">
+                {/* Red fill behind thumb */}
+                <div
+                  className="absolute inset-y-0 left-0 bg-gradient-to-r from-red-700 to-red-600 transition-all duration-75"
+                  style={{ width: `${Math.max(slideProgress, 12)}%`, opacity: 0.45 }}
+                />
+
+                {/* Center instruction text */}
+                <div className="relative z-10 h-full flex items-center justify-center pointer-events-none px-12">
+                  <span
+                    className="text-xs font-bold tracking-wide text-white transition-opacity"
+                    style={{ opacity: Math.max(0.15, 1 - slideProgress / 75) }}
+                  >
+                    {deletingWarehouse
+                      ? 'Eliminando almacén...'
+                      : 'Deslizar para eliminar almacén →'}
+                  </span>
+                </div>
+
+                {/* Visual Draggable Thumb */}
+                <div
+                  className="absolute top-1.5 bottom-1.5 w-11 rounded-full bg-red-600 text-white shadow-lg flex items-center justify-center pointer-events-none transition-all duration-75"
+                  style={{
+                    left: `calc(6px + (100% - 56px) * ${slideProgress / 100})`,
+                  }}
+                >
+                  <ChevronsRight className="w-5 h-5" />
+                </div>
+
+                {/* Native Touch/Mouse Range Input Overlay */}
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={slideProgress}
+                  disabled={deletingWarehouse}
+                  onChange={(e) => handleSlideChange(Number(e.target.value))}
+                  onTouchEnd={handleSlideRelease}
+                  onMouseUp={handleSlideRelease}
+                  onKeyUp={handleSlideRelease}
+                  aria-label="Deslizar para confirmar eliminación de almacén"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-grab active:cursor-grabbing z-20"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                disabled={deletingWarehouse}
+                onClick={() => {
+                  setWarehouseToDelete(null);
+                  setSlideProgress(0);
+                }}
+                className="w-full py-2.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+              >
+                Cancelar y Conservar Almacén
+              </button>
             </div>
           </div>
         </div>

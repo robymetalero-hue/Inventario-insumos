@@ -40,6 +40,14 @@ export interface WarehouseLocation {
   isDefault: boolean;
 }
 
+export interface ProductCategory {
+  id: number;
+  name: string;
+  accountingType: 'STRATEGIC_COMPONENT' | 'SECONDARY_COMPONENT' | 'PACKAGING_KIT' | 'UNIVERSAL_ACCESSORY' | 'FINISHED_GOOD';
+  description: string;
+  colorHex: string;
+}
+
 export interface Product {
   id: number;
   sku: string;
@@ -47,7 +55,7 @@ export interface Product {
   normalizedKey: string;
   description: string;
   productType: 'STRATEGIC_COMPONENT' | 'SECONDARY_COMPONENT' | 'PACKAGING_KIT' | 'UNIVERSAL_ACCESSORY' | 'FINISHED_GOOD';
-  family: string;
+  family: string; // Classification / Department Name
   brand: string;
   model: string;
   capacity: string;
@@ -260,6 +268,7 @@ export interface WorkspaceData {
   allWarehousesSummary: { id: number; code: string; name: string; isProductionPlant: boolean }[];
   locations: WarehouseLocation[];
   allLocationsSummary: { id: number; warehouseId: number; code: string; zoneName: string; shelfName: string }[];
+  categories: ProductCategory[];
   products: Product[];
   recipes: Recipe[];
   balances: InventoryBalance[];
@@ -304,7 +313,6 @@ export function formatBoliviaDateTime(isoString?: string | null): string {
       day: '2-digit',
       hour: '2-digit',
       minute: '2-digit',
-      second: '2-digit',
       hour12: false,
     }).format(new Date(isoString));
   } catch {
@@ -319,27 +327,38 @@ export function formatInt(num?: number | null): string {
 
 export function translateStatus(status: string): string {
   const map: Record<string, string> = {
-    AVAILABLE: 'Disponible',
+    AVAILABLE: 'Disponible en Almacén',
     RESERVED_ORDER: 'Reservado en Orden',
-    IN_TRANSIT_PRODUCTION: 'En Tránsito a Taller',
-    IN_PRODUCTION_CUSTODY: 'Bajo Custodia Producción',
+    IN_TRANSIT_PRODUCTION: 'En Camino a Producción',
+    IN_PRODUCTION_CUSTODY: 'En Taller de Producción',
     FINISHED_PENDING_PICKUP: 'Terminado Listo p/ Recoger',
     FINISHED_IN_TRANSIT: 'Terminado en Tránsito',
     IN_TRANSIT_TRANSFER: 'En Tránsito entre Almacenes',
-    DISCREPANCY_HOLD: 'Retenido por Discrepancia',
-    DAMAGED_QUARANTINE: 'Merma / Cuarentena',
+    DISCREPANCY_HOLD: 'Con Diferencia Física',
+    DAMAGED_QUARANTINE: 'Merma / Dañado',
   };
   return map[status] || status;
 }
 
 export function translateRole(role: string): string {
   const map: Record<string, string> = {
-    OWNER: 'Propietario / Superadmin',
+    OWNER: 'Administrador Principal',
     ADMIN: 'Administrador Operativo',
     WAREHOUSE_MANAGER: 'Encargado de Almacén',
     PRODUCTION_MANAGER: 'Encargado de Producción',
-    OPERATOR: 'Operario de Ensamblaje',
+    OPERATOR: 'Operario de Taller',
     AUDITOR: 'Receptor / Auditor',
   };
   return map[role] || role;
+}
+
+export function translateAccountingType(type: string): string {
+  const map: Record<string, string> = {
+    STRATEGIC_COMPONENT: 'Componente Principal (Se entrega por Orden, ej. UDP / microSD)',
+    SECONDARY_COMPONENT: 'Insumo de Taller (Se descuenta por Receta, ej. Case)',
+    PACKAGING_KIT: 'Empaque / Blíster (Se descuenta por Receta)',
+    UNIVERSAL_ACCESSORY: 'Accesorio Universal (Ej. Adaptador SD)',
+    FINISHED_GOOD: 'Producto Terminado (Generado al fabricar)',
+  };
+  return map[type] || type;
 }

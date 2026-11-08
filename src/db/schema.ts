@@ -59,20 +59,31 @@ export const userWarehousePermissions = pgTable('user_warehouse_permissions', {
   canApproveAdjustments: boolean('can_approve_adjustments').notNull().default(false),
 });
 
+// 3b. Dynamic Product Classifications / Departments (Empaques, Cases, Chips UDP, etc.)
+export const productCategories = pgTable('product_categories', {
+  id: serial('id').primaryKey(),
+  name: text('name').notNull().unique(), // e.g., Empaques, Cases, Chips UDP, Memorias microSD, Adaptadores, Producto Terminado
+  accountingType: text('accounting_type').notNull().default('SECONDARY_COMPONENT'),
+  // STRATEGIC_COMPONENT | SECONDARY_COMPONENT | PACKAGING_KIT | UNIVERSAL_ACCESSORY | FINISHED_GOOD
+  description: text('description').notNull().default(''),
+  colorHex: text('color_hex').notNull().default('#0284c7'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // 4. Master Catalog of Products, Components & Photos
 export const products = pgTable('products', {
   id: serial('id').primaryKey(),
   sku: text('sku').notNull().unique(),
   name: text('name').notNull(),
-  normalizedKey: text('normalized_key').notNull(), // Normalized brand+model+capacity+color to detect duplicates
+  normalizedKey: text('normalized_key').notNull(),
   description: text('description').notNull().default(''),
   productType: text('product_type').notNull(), // STRATEGIC_COMPONENT | SECONDARY_COMPONENT | PACKAGING_KIT | UNIVERSAL_ACCESSORY | FINISHED_GOOD
-  family: text('family').notNull(), // UDP | MICROSD | ADAPTADOR | EMPAQUE | CASE | USB_TERMINADO | MICROSD_TERMINADA | OTRO
+  family: text('family').notNull(), // Classification / Department Name (e.g. Empaques, Cases, Chips UDP)
   brand: text('brand').notNull().default('Genérico'),
   model: text('model').notNull().default('Estándar'),
-  capacity: text('capacity').notNull().default('N/A'), // 8GB | 16GB | 32GB | 64GB | 128GB | N/A
+  capacity: text('capacity').notNull().default('N/A'),
   color: text('color').notNull().default('N/A'),
-  material: text('material').notNull().default('N/A'), // Metal | Goma | Plástico | Papel+Blíster | Silicio
+  material: text('material').notNull().default('N/A'),
   unitName: text('unit_name').notNull().default('piezas'),
   unitsPerBox: integer('units_per_box').notNull().default(1000),
   imageUrl: text('image_url').notNull().default(''),
@@ -113,7 +124,7 @@ export const recipeComponents = pgTable('recipe_components', {
   recipeVersionId: integer('recipe_version_id').notNull().references(() => recipeVersions.id),
   componentProductId: integer('component_product_id').notNull().references(() => products.id),
   quantityPerUnit: integer('quantity_per_unit').notNull().default(1),
-  isStrategicOrderBound: boolean('is_strategic_order_bound').notNull().default(false), // true for UDP/microSD bound to OP custody; false for local workshop stock (case, adapter, packaging)
+  isStrategicOrderBound: boolean('is_strategic_order_bound').notNull().default(false),
 });
 
 // 6. Materialized Stock Balances (Locked via SELECT ... FOR UPDATE inside transactions)
@@ -123,11 +134,7 @@ export const inventoryBalances = pgTable('inventory_balances', {
   warehouseId: integer('warehouse_id').notNull().references(() => warehouses.id),
   locationId: integer('location_id').notNull().references(() => warehouseLocations.id),
   status: text('status').notNull(),
-  // Statuses:
-  // AVAILABLE | RESERVED_ORDER | IN_TRANSIT_PRODUCTION | IN_PRODUCTION_CUSTODY |
-  // FINISHED_PENDING_PICKUP | FINISHED_IN_TRANSIT | IN_TRANSIT_TRANSFER |
-  // DISCREPANCY_HOLD | DAMAGED_QUARANTINE
-  productionOrderId: integer('production_order_id').notNull().default(0), // 0 when not bound to a specific OP
+  productionOrderId: integer('production_order_id').notNull().default(0),
   quantity: integer('quantity').notNull().default(0),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -137,16 +144,13 @@ export const inventoryMovementDocuments = pgTable('inventory_movement_documents'
   id: serial('id').primaryKey(),
   folio: text('folio').notNull().unique(),
   movementType: text('movement_type').notNull(),
-  // INGRESO_PROVEEDOR | APERTURA_INICIAL | RESERVA_OP | DESPACHO_OP | ACEPTACION_OP |
-  // PRODUCCION_LOTE | RETORNO_INSUMO_OP | MERMA_OP | DESPACHO_TERMINADO | RECEPCION_TERMINADO |
-  // TRANSFERENCIA_SALIDA | TRANSFERENCIA_RECEPCION | CAMBIO_UBICACION | AJUSTE_CONTEO | REVERSION_COMPENSATORIA
   status: text('status').notNull().default('CONFIRMED'),
   sourceWarehouseId: integer('source_warehouse_id'),
   sourceLocationId: integer('source_location_id'),
   destWarehouseId: integer('dest_warehouse_id'),
   destLocationId: integer('dest_location_id'),
   productionOrderId: integer('production_order_id'),
-  referenceDocId: integer('reference_doc_id'), // Link to original document when reversing/adjusting
+  referenceDocId: integer('reference_doc_id'),
   supplierOrContainer: text('supplier_or_container').notNull().default(''),
   reason: text('reason').notNull().default(''),
   notes: text('notes').notNull().default(''),
@@ -162,7 +166,7 @@ export const inventoryMovementLines = pgTable('inventory_movement_lines', {
   productId: integer('product_id').notNull().references(() => products.id),
   historicalSku: text('historical_sku').notNull(),
   historicalName: text('historical_name').notNull(),
-  quantity: integer('quantity').notNull(), // Positive integer > 0
+  quantity: integer('quantity').notNull(),
   fromWarehouseId: integer('from_warehouse_id'),
   fromLocationId: integer('from_location_id'),
   fromStatus: text('from_status'),
@@ -178,15 +182,14 @@ export const inventoryMovementLines = pgTable('inventory_movement_lines', {
 // 8. Production Orders, Dispatches & Batches
 export const productionOrders = pgTable('production_orders', {
   id: serial('id').primaryKey(),
-  orderNumber: text('order_number').notNull().unique(), // OP-000125
+  orderNumber: text('order_number').notNull().unique(),
   status: text('status').notNull().default('RESERVED'),
-  // RESERVED | DISPATCHED | IN_PRODUCTION | PARTIALLY_COMPLETED | COMPLETED_PENDING_PICKUP | CLOSED | CANCELLED
   sourceWarehouseId: integer('source_warehouse_id').notNull().references(() => warehouses.id),
   sourceLocationId: integer('source_location_id').notNull().references(() => warehouseLocations.id),
   targetWarehouseId: integer('target_warehouse_id').notNull().references(() => warehouses.id),
   targetLocationId: integer('target_location_id').notNull().references(() => warehouseLocations.id),
   assignedUserId: integer('assigned_user_id').notNull().references(() => users.id),
-  strategicProductId: integer('strategic_product_id').notNull().references(() => products.id), // e.g., UDP 8GB or microSD 32GB
+  strategicProductId: integer('strategic_product_id').notNull().references(() => products.id),
   authorizedQty: integer('authorized_qty').notNull(),
   reservedQty: integer('reserved_qty').notNull().default(0),
   dispatchedQty: integer('dispatched_qty').notNull().default(0),
@@ -213,7 +216,7 @@ export const productionDispatches = pgTable('production_dispatches', {
   discrepancyQty: integer('discrepancy_qty').notNull().default(0),
   discrepancyNotes: text('discrepancy_notes').notNull().default(''),
   discrepancyResolved: boolean('discrepancy_resolved').notNull().default(false),
-  status: text('status').notNull().default('IN_TRANSIT'), // IN_TRANSIT | ACCEPTED | ACCEPTED_WITH_DISCREPANCY
+  status: text('status').notNull().default('IN_TRANSIT'),
   dispatchedByUserId: integer('dispatched_by_user_id').notNull().references(() => users.id),
   receivedByUserId: integer('received_by_user_id'),
   dispatchedAt: timestamp('dispatched_at', { withTimezone: true }).notNull().defaultNow(),
@@ -250,7 +253,7 @@ export const finishedGoodsDispatches = pgTable('finished_goods_dispatches', {
   dispatchedQty: integer('dispatched_qty').notNull(),
   receivedQty: integer('received_qty'),
   discrepancyQty: integer('discrepancy_qty').notNull().default(0),
-  status: text('status').notNull().default('IN_TRANSIT'), // IN_TRANSIT | RECEIVED | RECEIVED_WITH_DISCREPANCY
+  status: text('status').notNull().default('IN_TRANSIT'),
   dispatchedByUserId: integer('dispatched_by_user_id').notNull().references(() => users.id),
   receivedByUserId: integer('received_by_user_id'),
   notes: text('notes').notNull().default(''),
@@ -270,7 +273,7 @@ export const warehouseTransfers = pgTable('warehouse_transfers', {
   dispatchedQty: integer('dispatched_qty').notNull(),
   receivedQty: integer('received_qty'),
   discrepancyQty: integer('discrepancy_qty').notNull().default(0),
-  status: text('status').notNull().default('IN_TRANSIT'), // IN_TRANSIT | COMPLETED | DISCREPANCY
+  status: text('status').notNull().default('IN_TRANSIT'),
   dispatchedByUserId: integer('dispatched_by_user_id').notNull().references(() => users.id),
   receivedByUserId: integer('received_by_user_id'),
   notes: text('notes').notNull().default(''),
@@ -289,7 +292,7 @@ export const physicalCounts = pgTable('physical_counts', {
   systemExpectedQty: integer('system_expected_qty').notNull(),
   countedQty: integer('counted_qty').notNull(),
   differenceQty: integer('difference_qty').notNull(),
-  status: text('status').notNull().default('PENDING_APPROVAL'), // PENDING_APPROVAL | APPROVED_ADJUSTED | REJECTED
+  status: text('status').notNull().default('PENDING_APPROVAL'),
   countedByUserId: integer('counted_by_user_id').notNull().references(() => users.id),
   reviewedByUserId: integer('reviewed_by_user_id'),
   notes: text('notes').notNull().default(''),
@@ -331,7 +334,7 @@ export const securityAuditEvents = pgTable('security_audit_events', {
   id: serial('id').primaryKey(),
   userId: integer('user_id'),
   username: text('username').notNull().default('anonymous'),
-  eventType: text('event_type').notNull(), // ACCESS_DENIED | IDOR_ATTEMPT | LOGIN_SUCCESS | LOGIN_FAILURE | ROLE_SWITCH | ADJUSTMENT_APPROVED
+  eventType: text('event_type').notNull(),
   endpoint: text('endpoint').notNull(),
   details: text('details').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan arquitectónico, de flujos, modelo de datos, seguridad, invariantes contables y diseño de interfaz para el Sistema Web de Inventario de Insumos, Almacenes, Transformación y Producción.",
-  "updatedAt":  "2026-11-08T21:13:33.632434176Z",
+  "summary":  "Plan para habilitar el acceso directo en celular/PC como Aplicación Web Instalable (PWA), corregir el ruteo de producción en Cloud Run para evitar errores 404 y mantener el login normal con admin / 1234.",
+  "updatedAt":  "2026-11-08T23:29:28.261847088Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -1,66 +1,69 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
 import {
-  WifiOff,
-  ShieldAlert,
-  LogOut,
-  RefreshCw,
-  Boxes,
+  Package,
   Factory,
-  ArrowRightLeft,
-  FileSpreadsheet,
+  Truck,
+  ArrowLeftRight,
+  History,
   Lock,
-  UserCheck,
-  AlertTriangle,
+  LogOut,
+  Wifi,
+  WifiOff,
   CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  Tags,
+  Layers,
+  Building2,
+  Users,
+  Menu,
+  X,
 } from 'lucide-react';
-import { auth, googleAuthProvider } from './lib/firebase.ts';
-import {
-  WorkspaceData,
-  formatInt,
-  translateRole,
-  formatBoliviaDateTime,
-} from './types.ts';
+import { UserProfile, WorkspaceData, translateRole } from './types.ts';
 import { CatalogAndStockView } from './components/CatalogAndStockView.tsx';
 import { ProductionAndPickupView } from './components/ProductionAndPickupView.tsx';
 import { OperationsAuditAndPrivateView } from './components/OperationsAuditAndPrivateView.tsx';
+import { PWAInstallButton } from './components/PWAInstallButton.tsx';
+
+type ActiveModule =
+  | 'STOCK_CATALOG'
+  | 'CATEGORIES'
+  | 'WAREHOUSES_LOCATIONS'
+  | 'PRODUCTION_ORDERS'
+  | 'BOM_RECIPES'
+  | 'PICKUPS_DELIVERIES'
+  | 'TRANSFERS_COUNTS'
+  | 'KARDEX_REPORTS'
+  | 'USERS_MANAGEMENT'
+  | 'OWNER_PRIVATE';
 
 export default function App() {
-  // Authentication token stored strictly in React memory (never localStorage)
-  const [authToken, setAuthToken] = useState<string | null>(null);
-  const [simulatedUserId, setSimulatedUserId] = useState<number | null>(null);
-  const [availableProfiles, setAvailableProfiles] = useState<
-    { id: number; username: string; fullName: string; role: string }[]
-  >([]);
+  const [token, setToken] = useState<string>('');
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [data, setData] = useState<WorkspaceData | null>(null);
+  const [activeModule, setActiveModule] = useState<ActiveModule>('STOCK_CATALOG');
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
-  // Login Form State
-  const [loginUsername, setLoginUsername] = useState('propietario');
-  const [loginPassword, setLoginPassword] = useState('operacion2026');
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [loginLoading, setLoginLoading] = useState(false);
+  // Login form state (defaults to admin / 1234 for fast entry)
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('1234');
+  const [authError, setAuthError] = useState('');
 
-  // Strict Online-Only State & Simulated Network Cut Toggle
-  const [browserOnline, setBrowserOnline] = useState<boolean>(navigator.onLine);
-  const [simulateOfflineCut, setSimulateOfflineCut] = useState<boolean>(false);
-  const isOnline = browserOnline && !simulateOfflineCut;
+  // Toast notifications
+  const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
-  // Workspace Data State
-  const [workspaceData, setWorkspaceData] = useState<WorkspaceData | null>(null);
-  const [loadingWorkspace, setLoadingWorkspace] = useState(false);
-  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-
-  // Primary Navigation Section
-  const [activeNav, setActiveNav] = useState<
-    | 'INVENTARIO_CATALOGO'
-    | 'PRODUCCION_RECOGIDA'
-    | 'TRASLADOS_CONTEOS'
-    | 'KARDEX_REPORTES'
-    | 'ZONA_PRIVADA'
-  >('INVENTARIO_CATALOGO');
+  const notify = useCallback((msg: string, type: 'success' | 'error' = 'success') => {
+    setToast({ msg, type });
+    setTimeout(() => {
+      setToast((prev) => (prev?.msg === msg ? null : prev));
+    }, 4500);
+  }, []);
 
   useEffect(() => {
-    const handleOnline = () => setBrowserOnline(true);
-    const handleOffline = () => setBrowserOnline(false);
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     return () => {
@@ -71,250 +74,144 @@ export default function App() {
 
   const apiFetch = useCallback(
     async (url: string, options: RequestInit = {}) => {
-      if (!isOnline && options.method && options.method !== 'GET') {
-        throw new Error(
-          'Sin conexión a Internet: Operación bloqueada. Ningún movimiento se guarda localmente ni en cola offline.'
-        );
+      const headers = new Headers(options.headers || {});
+      if (!headers.has('Content-Type') && options.body) {
+        headers.set('Content-Type', 'application/json');
       }
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        ...((options.headers as Record<string, string>) || {}),
-      };
-      if (authToken) {
-        headers['Authorization'] = `Bearer ${authToken}`;
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`);
       }
-      if (simulatedUserId) {
-        headers['x-simulate-user-id'] = String(simulatedUserId);
-      }
-
-      const response = await fetch(url, {
-        ...options,
-        headers,
-      });
-
-      const json = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const err: any = new Error(json.error || `Error del servidor (${response.status})`);
-        Object.assign(err, json);
-        throw err;
+      const res = await fetch(url, { ...options, headers });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(json.error || 'Error en la comunicación con el servidor');
       }
       return json;
     },
-    [authToken, simulatedUserId, isOnline]
+    [token]
   );
 
-  const loadWorkspace = useCallback(async () => {
-    if (!authToken) return;
-    setLoadingWorkspace(true);
-    setWorkspaceError(null);
-    try {
-      const [meRes, wsRes] = await Promise.all([
-        apiFetch('/api/auth/me'),
-        apiFetch('/api/workspace'),
-      ]);
-      setAvailableProfiles(meRes.availableTestProfiles || []);
-      setWorkspaceData(wsRes);
-
-      // First-load auto-verification if balances are empty so the user immediately sees Cases A-H ready
-      if (wsRes.balances.length === 0 && (wsRes.user.role === 'OWNER' || wsRes.user.role === 'ADMIN')) {
-        await apiFetch('/api/Verification/run-suite', { method: 'POST' });
-        const refreshed = await apiFetch('/api/workspace');
-        setWorkspaceData(refreshed);
+  const fetchWorkspace = useCallback(
+    async (currentToken?: string) => {
+      const tk = currentToken || token;
+      if (!tk) return;
+      setLoading(true);
+      try {
+        const res = await fetch('/api/workspace', {
+          headers: { Authorization: `Bearer ${tk}` },
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error || 'Error cargando datos del sistema');
+        setData(json);
+        setUser(json.user);
+      } catch (err: any) {
+        notify(err.message, 'error');
+      } finally {
+        setLoading(false);
       }
-    } catch (err: any) {
-      setWorkspaceError(err.message);
-    } finally {
-      setLoadingWorkspace(false);
-    }
-  }, [authToken, apiFetch]);
+    },
+    [token, notify]
+  );
 
-  useEffect(() => {
-    if (authToken) {
-      loadWorkspace();
-    }
-  }, [authToken, simulatedUserId, loadWorkspace]);
-
-  const handleLocalLogin = async (e?: React.FormEvent, presetUser?: string) => {
-    if (e) e.preventDefault();
-    if (!isOnline) {
-      setLoginError('Sin conexión a Internet: no es posible iniciar sesión.');
-      return;
-    }
-    setLoginLoading(true);
-    setLoginError(null);
+  const handleCredentialsLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    setLoading(true);
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: presetUser || loginUsername,
-          password: loginPassword,
-        }),
+        body: JSON.stringify({ username: username.trim(), password }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data.error || 'Error de autenticación');
-      }
-      setSimulatedUserId(null);
-      setAuthToken(data.token);
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Usuario o contraseña incorrectos');
+      setToken(json.token);
+      setUser(json.user);
+      setActiveModule('STOCK_CATALOG');
+      await fetchWorkspace(json.token);
     } catch (err: any) {
-      setLoginError(err.message);
+      setAuthError(err.message);
     } finally {
-      setLoginLoading(false);
+      setLoading(false);
     }
   };
 
-  const handleGoogleLogin = async () => {
-    if (!isOnline) {
-      setLoginError('Sin conexión a Internet: no es posible iniciar sesión con Google.');
-      return;
-    }
-    setLoginLoading(true);
-    setLoginError(null);
-    try {
-      const cred = await signInWithPopup(auth, googleAuthProvider);
-      const idToken = await cred.user.getIdToken();
-      setSimulatedUserId(null);
-      setAuthToken(idToken);
-    } catch (err: any) {
-      setLoginError(
-        err.message || 'No se pudo completar el inicio de sesión con Google.'
-      );
-    } finally {
-      setLoginLoading(false);
-    }
+  const handleLogout = () => {
+    setToken('');
+    setUser(null);
+    setData(null);
   };
 
-  const handleLogout = async () => {
-    try {
-      await firebaseSignOut(auth).catch(() => {});
-    } finally {
-      setAuthToken(null);
-      setWorkspaceData(null);
-      setSimulatedUserId(null);
-    }
-  };
-
-  // =========================================================================
-  // LOGIN VIEW (When no session is active)
-  // =========================================================================
-  if (!authToken) {
+  // ============================================================================
+  // PANTALLA DE INICIO DE SESION (PRODUCCION)
+  // ============================================================================
+  if (!user || !token) {
     return (
-      <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4">
-        {!isOnline && (
-          <div className="mb-4 max-w-md w-full bg-red-600 text-white p-3.5 rounded-lg flex items-center gap-3 text-xs font-medium">
-            <WifiOff className="w-5 h-5 shrink-0" />
-            <span>
-              Sin conexión: operaciones deshabilitadas. Esta aplicación requiere conexión en línea
-              con el servidor central.
-            </span>
-          </div>
-        )}
-
-        <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-7 space-y-6">
-          <div>
-            <div className="text-xs font-mono font-semibold text-sky-700">
-              SISTEMA TRANSACCIONAL CENTRALIZADO (100% EN LÍNEA)
+      <div className="min-h-screen bg-slate-900 flex flex-col justify-center items-center p-4">
+        <div className="max-w-md w-full bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
+          <div className="bg-slate-950 p-7 text-white text-center border-b border-slate-800">
+            <div className="w-14 h-14 rounded-2xl bg-blue-600 flex items-center justify-center mx-auto mb-3 shadow-lg shadow-blue-600/30">
+              <Package className="w-7 h-7 text-white" />
             </div>
-            <h1 className="text-2xl font-bold text-slate-900 mt-1">
-              ControlStock Pro
-            </h1>
-            <p className="text-xs text-slate-600 mt-1">
-              Gestión de Insumos Tecnológicos, Almacenes (Sencata, Villa Dolores, Puente Bolivia),
-              Recetas de Ensamblaje (BOM) y Órdenes de Producción.
+            <h1 className="text-2xl font-bold tracking-tight">ControlStock Pro</h1>
+            <p className="text-xs text-slate-400 mt-1">
+              Sistema de Inventario, Almacenes, Producción y Entregas
             </p>
           </div>
 
-          {loginError && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-md text-xs text-red-800">
-              {loginError}
-            </div>
-          )}
+          <div className="p-7 space-y-5">
+            {!isOnline && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold">
+                <WifiOff className="w-4 h-4 shrink-0" />
+                Sin conexión a internet. El sistema requiere conexión activa.
+              </div>
+            )}
 
-          {/* Local Username & Password Form */}
-          <form onSubmit={(e) => handleLocalLogin(e)} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Usuario Individual
-              </label>
-              <input
-                type="text"
-                value={loginUsername}
-                onChange={(e) => setLoginUsername(e.target.value)}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                required
-              />
-            </div>
+            {authError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {authError}
+              </div>
+            )}
 
-            <div>
-              <label className="block text-xs font-medium text-slate-700 mb-1">
-                Contraseña
-              </label>
-              <input
-                type="password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                className="w-full text-sm border border-slate-300 rounded-md px-3 py-2"
-                required
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loginLoading || !isOnline}
-              className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 disabled:opacity-50 transition-colors"
-            >
-              {loginLoading ? 'Verificando en servidor...' : 'Iniciar Sesión Operativa'}
-            </button>
-          </form>
-
-          {/* Google Sign-In for Owner */}
-          <div className="pt-4 border-t border-slate-200 space-y-3">
-            <button
-              type="button"
-              disabled={loginLoading || !isOnline}
-              onClick={handleGoogleLogin}
-              className="w-full py-2.5 px-4 text-xs font-semibold text-slate-800 bg-white border border-slate-300 rounded-md hover:bg-slate-50 transition-colors"
-            >
-              Iniciar Sesión con Google (Propietario / Superadmin)
-            </button>
-          </div>
-
-          {/* Quick Test Role Access Strip */}
-          <div className="pt-4 border-t border-slate-200 space-y-2">
-            <div className="text-[11px] font-semibold text-slate-600">
-              Acceso rápido para pruebas de permisos por rol y almacén (Clave: operacion2026):
-            </div>
-            <div className="grid grid-cols-2 gap-2">
+            <form onSubmit={handleCredentialsLogin} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Usuario
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="admin"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Contraseña
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••"
+                  className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
               <button
-                type="button"
-                onClick={() => handleLocalLogin(undefined, 'propietario')}
-                className="px-2.5 py-1.5 text-left text-[11px] bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-800"
+                type="submit"
+                disabled={loading || !isOnline}
+                className="w-full py-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-colors shadow-sm cursor-pointer"
               >
-                1. Propietario (Global + Costos)
+                {loading ? 'Ingresando al sistema...' : 'Iniciar Sesión'}
               </button>
-              <button
-                type="button"
-                onClick={() => handleLocalLogin(undefined, 'almacen_sencata')}
-                className="px-2.5 py-1.5 text-left text-[11px] bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-800"
-              >
-                2. Encargado Solo Sencata
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLocalLogin(undefined, 'prod_villadolores')}
-                className="px-2.5 py-1.5 text-left text-[11px] bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-800"
-              >
-                3. Producción Villa Dolores
-              </button>
-              <button
-                type="button"
-                onClick={() => handleLocalLogin(undefined, 'auditor_puente')}
-                className="px-2.5 py-1.5 text-left text-[11px] bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-800"
-              >
-                4. Receptor Puente Bolivia
-              </button>
+            </form>
+
+            <div className="pt-2 border-t border-slate-100">
+              <PWAInstallButton variant="login" />
             </div>
           </div>
         </div>
@@ -322,391 +219,286 @@ export default function App() {
     );
   }
 
-  // =========================================================================
-  // AUTHENTICATED WORKSPACE
-  // =========================================================================
-  const currentUser = workspaceData?.user;
-  const canSeePrivateZone =
-    currentUser?.role === 'OWNER' || currentUser?.canViewPrivateCosts;
+  const navItems: {
+    id: ActiveModule;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+    group: string;
+    roles?: string[];
+  }[] = [
+    {
+      id: 'STOCK_CATALOG',
+      label: 'Inventario y Productos',
+      icon: Package,
+      group: 'INVENTARIO',
+    },
+    {
+      id: 'CATEGORIES',
+      label: 'Clasificaciones (Dptos.)',
+      icon: Tags,
+      group: 'INVENTARIO',
+    },
+    {
+      id: 'WAREHOUSES_LOCATIONS',
+      label: 'Almacenes y Estantes',
+      icon: Building2,
+      group: 'INVENTARIO',
+    },
+    {
+      id: 'PRODUCTION_ORDERS',
+      label: 'Producción y Órdenes',
+      icon: Factory,
+      group: 'PRODUCCIÓN Y SALIDAS',
+    },
+    {
+      id: 'BOM_RECIPES',
+      label: 'Recetas de Ensamblaje',
+      icon: Layers,
+      group: 'PRODUCCIÓN Y SALIDAS',
+    },
+    {
+      id: 'PICKUPS_DELIVERIES',
+      label: 'Recogida de Terminados',
+      icon: Truck,
+      group: 'PRODUCCIÓN Y SALIDAS',
+    },
+    {
+      id: 'TRANSFERS_COUNTS',
+      label: 'Traslados y Conteos',
+      icon: ArrowLeftRight,
+      group: 'CONTROL Y ADMINISTRACIÓN',
+    },
+    {
+      id: 'KARDEX_REPORTS',
+      label: 'Historial (Kardex)',
+      icon: History,
+      group: 'CONTROL Y ADMINISTRACIÓN',
+    },
+    {
+      id: 'USERS_MANAGEMENT',
+      label: 'Usuarios y Accesos',
+      icon: Users,
+      group: 'CONTROL Y ADMINISTRACIÓN',
+      roles: ['OWNER', 'ADMIN'],
+    },
+    {
+      id: 'OWNER_PRIVATE',
+      label: 'Costos Privados (Owner)',
+      icon: Lock,
+      group: 'CONTROL Y ADMINISTRACIÓN',
+      roles: ['OWNER'],
+    },
+  ];
 
-  // Compute global KPI summary without inflating or double-counting states
-  const totalAvailableUnits = (workspaceData?.balances || [])
-    .filter((b) => b.status === 'AVAILABLE')
-    .reduce((s, b) => s + b.quantity, 0);
-  const totalReservedUnits = (workspaceData?.balances || [])
-    .filter((b) => b.status === 'RESERVED_ORDER')
-    .reduce((s, b) => s + b.quantity, 0);
-  const totalInProductionUnits = (workspaceData?.balances || [])
-    .filter(
-      (b) =>
-        b.status === 'IN_PRODUCTION_CUSTODY' || b.status === 'IN_TRANSIT_PRODUCTION'
-    )
-    .reduce((s, b) => s + b.quantity, 0);
-  const totalFinishedPendingPickup = (workspaceData?.balances || [])
-    .filter(
-      (b) =>
-        b.status === 'FINISHED_PENDING_PICKUP' || b.status === 'FINISHED_IN_TRANSIT'
-    )
-    .reduce((s, b) => s + b.quantity, 0);
-  const totalDiscrepancyUnits = (workspaceData?.balances || [])
-    .filter((b) => b.status === 'DISCREPANCY_HOLD')
-    .reduce((s, b) => s + b.quantity, 0);
+  const visibleNavItems = navItems.filter(
+    (item) => !item.roles || item.roles.includes(user.role)
+  );
+
+  const groups = Array.from(new Set(visibleNavItems.map((i) => i.group)));
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* STRICT OFFLINE BANNER (Section 17 & Criteria Non-Negotiable) */}
+    <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col lg:flex-row">
+      {/* Off-line blocker */}
       {!isOnline && (
-        <div className="bg-red-600 text-white px-6 py-3 flex items-center justify-between gap-4 text-xs font-semibold">
-          <div className="flex items-center gap-2.5">
-            <WifiOff className="w-4 h-4 shrink-0" />
-            <span>
-              Sin conexión: operaciones deshabilitadas. No se guardan movimientos en el navegador ni
-              existen colas offline. Reconecte para confirmar en el servidor.
-            </span>
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 text-center shadow-2xl border border-red-200">
+            <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto mb-3">
+              <WifiOff className="w-6 h-6" />
+            </div>
+            <h2 className="text-lg font-bold text-slate-900">Conexión Perdida</h2>
+            <p className="text-xs text-slate-600 mt-1">
+              Para evitar errores de inventario, las operaciones están pausadas hasta recuperar internet.
+            </p>
           </div>
-          {simulateOfflineCut && (
-            <button
-              onClick={() => setSimulateOfflineCut(false)}
-              className="px-3 py-1 bg-white text-red-700 rounded font-bold shrink-0"
-            >
-              Restaurar Conexión (Fin Prueba Caso F)
-            </button>
-          )}
         </div>
       )}
 
-      {/* TOP BAR CONTRACT: Strictly 3 zones separated by gap-8 */}
-      <header className="bg-white border-b border-slate-200 px-6 py-3.5 flex items-center justify-between gap-8">
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#top"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveNav('INVENTARIO_CATALOGO');
-          }}
-          className="text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 max-w-md">
+          <div
+            className={`px-4 py-3.5 rounded-xl shadow-lg border flex items-center gap-2.5 text-xs font-bold ${
+              toast.type === 'success'
+                ? 'bg-emerald-950 text-white border-emerald-800'
+                : 'bg-red-950 text-white border-red-800'
+            }`}
+          >
+            {toast.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+            )}
+            <span>{toast.msg}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile Header */}
+      <div className="lg:hidden bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center">
+            <Package className="w-4 h-4 text-white" />
+          </div>
+          <span className="font-bold text-sm">ControlStock Pro</span>
+        </div>
+        <button
+          onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+          className="p-2 rounded-lg bg-slate-800 text-slate-200 cursor-pointer"
         >
-          ControlStock Pro
-        </a>
+          {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+      </div>
 
-        {/* Zone 2: 4–5 concise single-line navigation links */}
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-          <a
-            href="#inventario"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveNav('INVENTARIO_CATALOGO');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'INVENTARIO_CATALOGO'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-sky-600'
-                : ''
-            }`}
-          >
-            Inventario y Catálogo
-          </a>
-          <a
-            href="#produccion"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveNav('PRODUCCION_RECOGIDA');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'PRODUCCION_RECOGIDA'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-sky-600'
-                : ''
-            }`}
-          >
-            Producción y Recogida
-          </a>
-          <a
-            href="#traslados"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveNav('TRASLADOS_CONTEOS');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'TRASLADOS_CONTEOS'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-sky-600'
-                : ''
-            }`}
-          >
-            Traslados y Conteos
-          </a>
-          <a
-            href="#kardex"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveNav('KARDEX_REPORTES');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'KARDEX_REPORTES'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-sky-600'
-                : ''
-            }`}
-          >
-            Kardex y Reportes
-          </a>
-          <a
-            href="#privado"
-            onClick={(e) => {
-              e.preventDefault();
-              setActiveNav('ZONA_PRIVADA');
-            }}
-            className={`hover:text-slate-900 transition-colors whitespace-nowrap shrink-0 ${
-              activeNav === 'ZONA_PRIVADA'
-                ? 'text-slate-900 underline underline-offset-8 decoration-2 decoration-sky-600'
-                : ''
-            }`}
-          >
-            Zona Privada Dueño
-          </a>
-        </nav>
+      {/* Left Sidebar Navigation */}
+      <aside
+        className={`${
+          mobileMenuOpen ? 'block' : 'hidden'
+        } lg:flex lg:flex-col lg:w-64 bg-slate-900 text-slate-200 shrink-0 border-r border-slate-800 lg:min-h-screen sticky top-0 z-20`}
+      >
+        {/* Brand */}
+        <div className="p-5 border-b border-slate-800 hidden lg:flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow-md shadow-blue-600/20">
+            <Package className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-base font-bold text-white leading-tight">ControlStock Pro</h1>
+            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400 font-medium">
+              <Wifi className="w-3 h-3" /> En línea
+            </span>
+          </div>
+        </div>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Navigation Links */}
+        <div className="flex-1 overflow-y-auto py-4 px-3 space-y-5">
+          {groups.map((grp) => (
+            <div key={grp}>
+              <div className="px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                {grp}
+              </div>
+              <div className="space-y-1">
+                {visibleNavItems
+                  .filter((i) => i.group === grp)
+                  .map((item) => {
+                    const Icon = item.icon;
+                    const active = activeModule === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          setActiveModule(item.id);
+                          setMobileMenuOpen(false);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                          active
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 shrink-0" />
+                        <span className="truncate">{item.label}</span>
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* User Footer */}
+        <div className="p-4 border-t border-slate-800 bg-slate-950/60">
+          <PWAInstallButton variant="sidebar" />
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate">{user.fullName}</div>
+              <div className="text-[11px] text-slate-400 truncate">
+                {translateRole(user.role)}
+              </div>
+            </div>
+            <button
+              onClick={() => fetchWorkspace()}
+              title="Actualizar datos"
+              className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin text-blue-400' : ''}`} />
+            </button>
+          </div>
           <button
             onClick={handleLogout}
-            className="px-4 py-2 text-xs font-medium text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+            className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-red-600/90 text-slate-200 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
+            <LogOut className="w-3.5 h-3.5" />
             Cerrar Sesión
           </button>
         </div>
-      </header>
+      </aside>
 
-      {/* Mobile Navigation Bar */}
-      <div className="md:hidden bg-white border-b border-slate-200 px-4 py-2 flex items-center gap-2 overflow-x-auto">
-        <button
-          onClick={() => setActiveNav('INVENTARIO_CATALOGO')}
-          className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
-            activeNav === 'INVENTARIO_CATALOGO'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600'
-          }`}
-        >
-          Inventario
-        </button>
-        <button
-          onClick={() => setActiveNav('PRODUCCION_RECOGIDA')}
-          className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
-            activeNav === 'PRODUCCION_RECOGIDA'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600'
-          }`}
-        >
-          Producción
-        </button>
-        <button
-          onClick={() => setActiveNav('TRASLADOS_CONTEOS')}
-          className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
-            activeNav === 'TRASLADOS_CONTEOS'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600'
-          }`}
-        >
-          Traslados
-        </button>
-        <button
-          onClick={() => setActiveNav('KARDEX_REPORTES')}
-          className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
-            activeNav === 'KARDEX_REPORTES'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600'
-          }`}
-        >
-          Kardex
-        </button>
-        <button
-          onClick={() => setActiveNav('ZONA_PRIVADA')}
-          className={`px-3 py-1.5 text-xs font-medium rounded whitespace-nowrap shrink-0 ${
-            activeNav === 'ZONA_PRIVADA'
-              ? 'bg-slate-900 text-white'
-              : 'text-slate-600'
-          }`}
-        >
-          Zona Privada
-        </button>
-      </div>
-
-      {/* WORKSPACE CONTEXT & ROLE SIMULATOR TOOLBAR */}
-      <div className="bg-slate-100 border-b border-slate-200 px-6 py-2.5 flex flex-wrap items-center justify-between gap-4 text-xs">
-        <div className="flex flex-wrap items-center gap-3 text-slate-700">
-          <span>
-            Usuario Activo:{' '}
-            <strong className="text-slate-900">{currentUser?.fullName}</strong>
-          </span>
-          <span>·</span>
-          <span>
-            Rol: <strong className="text-sky-800">{translateRole(currentUser?.role || '')}</strong>
-          </span>
-          <span>·</span>
-          <span>
-            Costos Privados:{' '}
-            <strong>{canSeePrivateZone ? 'Autorizado' : 'Bloqueado en Servidor'}</strong>
-          </span>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Quick Role Switcher for Testing Permissions */}
-          <div className="flex items-center gap-1.5">
-            <span className="text-slate-600 font-medium">Cambiar Rol de Prueba:</span>
-            <select
-              value={simulatedUserId || currentUser?.id || ''}
-              onChange={(e) => setSimulatedUserId(Number(e.target.value))}
-              className="text-xs border border-slate-300 rounded px-2 py-1 bg-white font-medium text-slate-900"
-            >
-              {availableProfiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.fullName} — [{p.role}]
-                </option>
-              ))}
-            </select>
+      {/* Main Content Area */}
+      <main className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+        {!data ? (
+          <div className="bg-white border border-slate-200 rounded-2xl p-12 text-center text-sm text-slate-500">
+            Cargando datos del sistema...
           </div>
+        ) : (
+          <>
+            {(activeModule === 'STOCK_CATALOG' ||
+              activeModule === 'CATEGORIES' ||
+              activeModule === 'WAREHOUSES_LOCATIONS') && (
+              <CatalogAndStockView
+                data={data}
+                isOnline={isOnline}
+                initialSubView={
+                  activeModule === 'STOCK_CATALOG'
+                    ? 'PRODUCTS'
+                    : activeModule === 'CATEGORIES'
+                    ? 'CATEGORIES'
+                    : 'WAREHOUSES'
+                }
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
 
-          {/* Simulate Offline Mode Button (Case F) */}
-          <button
-            type="button"
-            onClick={() => setSimulateOfflineCut(!simulateOfflineCut)}
-            className={`px-2.5 py-1 rounded border text-xs font-medium whitespace-nowrap shrink-0 ${
-              simulateOfflineCut
-                ? 'bg-red-600 text-white border-red-700'
-                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-            }`}
-          >
-            {simulateOfflineCut
-              ? 'Modo Sin Red Activo (Click para Reconectar)'
-              : 'Simular Corte de Internet (Caso F)'}
-          </button>
+            {(activeModule === 'PRODUCTION_ORDERS' ||
+              activeModule === 'BOM_RECIPES' ||
+              activeModule === 'PICKUPS_DELIVERIES') && (
+              <ProductionAndPickupView
+                data={data}
+                isOnline={isOnline}
+                initialSubView={
+                  activeModule === 'PRODUCTION_ORDERS'
+                    ? 'ORDENES'
+                    : activeModule === 'BOM_RECIPES'
+                    ? 'RECETAS'
+                    : 'RECOGIDA'
+                }
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
 
-          <button
-            type="button"
-            onClick={loadWorkspace}
-            className="px-2.5 py-1 bg-white border border-slate-300 rounded text-slate-700 hover:bg-slate-50 flex items-center gap-1"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loadingWorkspace ? 'animate-spin' : ''}`} />
-            Sincronizar
-          </button>
-        </div>
-      </div>
-
-      {/* MAIN VIEWPORT CONTAINER */}
-      <main className="flex-1 max-w-[1400px] w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
-        {workspaceError && (
-          <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-xs text-red-900">
-            {workspaceError}
-          </div>
+            {(activeModule === 'TRANSFERS_COUNTS' ||
+              activeModule === 'KARDEX_REPORTS' ||
+              activeModule === 'USERS_MANAGEMENT' ||
+              activeModule === 'OWNER_PRIVATE') && (
+              <OperationsAuditAndPrivateView
+                data={data}
+                isOnline={isOnline}
+                initialSubView={
+                  activeModule === 'TRANSFERS_COUNTS'
+                    ? 'TRANSFERS'
+                    : activeModule === 'KARDEX_REPORTS'
+                    ? 'KARDEX'
+                    : activeModule === 'USERS_MANAGEMENT'
+                    ? 'USERS'
+                    : 'PRIVATE_OWNER'
+                }
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
+          </>
         )}
-
-        {/* Global Non-Inflated State Summary Strip */}
-        {workspaceData && (
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-            <div className="bg-white p-4 rounded-lg border border-slate-200">
-              <div className="text-xs text-slate-500">Stock Disponible Libre</div>
-              <div className="text-xl font-mono font-bold text-emerald-700 mt-1 tabular-nums">
-                {formatInt(totalAvailableUnits)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                En almacenes autorizados
-              </div>
-            </div>
-
-            <div className="bg-white p-4 rounded-lg border border-slate-200">
-              <div className="text-xs text-slate-500">Reservado en Órdenes (Origen)</div>
-              <div className="text-xl font-mono font-bold text-amber-700 mt-1 tabular-nums">
-                {formatInt(totalReservedUnits)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                Apartado sin consumir aún
-              </div>
-            </div>
-
-            <div className="bg-white p-4 rounded-lg border border-slate-200">
-              <div className="text-xs text-slate-500">En Custodia de Producción</div>
-              <div className="text-xl font-mono font-bold text-sky-700 mt-1 tabular-nums">
-                {formatInt(totalInProductionUnits)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                UDP / microSD en taller
-              </div>
-            </div>
-
-            <div className="bg-white p-4 rounded-lg border border-slate-200">
-              <div className="text-xs text-slate-500">Terminados Listos p/ Recoger</div>
-              <div className="text-xl font-mono font-bold text-indigo-700 mt-1 tabular-nums">
-                {formatInt(totalFinishedPendingPickup)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                Pendientes de recepción formal
-              </div>
-            </div>
-
-            <div className="bg-white p-4 rounded-lg border border-slate-200">
-              <div className="text-xs text-slate-500">Retenido por Discrepancia</div>
-              <div
-                className={`text-xl font-mono font-bold mt-1 tabular-nums ${
-                  totalDiscrepancyUnits > 0 ? 'text-red-600' : 'text-slate-400'
-                }`}
-              >
-                {formatInt(totalDiscrepancyUnits)}
-              </div>
-              <div className="text-[11px] text-slate-400 mt-0.5">
-                Diferencias por conciliar
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Active Module Content */}
-        {workspaceData && activeNav === 'INVENTARIO_CATALOGO' && (
-          <CatalogAndStockView
-            data={workspaceData}
-            isOnline={isOnline}
-            apiFetch={apiFetch}
-            onRefresh={loadWorkspace}
-          />
-        )}
-
-        {workspaceData && activeNav === 'PRODUCCION_RECOGIDA' && (
-          <ProductionAndPickupView
-            data={workspaceData}
-            isOnline={isOnline}
-            apiFetch={apiFetch}
-            onRefresh={loadWorkspace}
-          />
-        )}
-
-        {workspaceData &&
-          (activeNav === 'TRASLADOS_CONTEOS' ||
-            activeNav === 'KARDEX_REPORTES' ||
-            activeNav === 'ZONA_PRIVADA') && (
-            <OperationsAuditAndPrivateView
-              data={workspaceData}
-              isOnline={isOnline}
-              activeSection={
-                activeNav === 'TRASLADOS_CONTEOS'
-                  ? 'TRANSFERS_COUNTS'
-                  : activeNav === 'KARDEX_REPORTES'
-                  ? 'KARDEX_REPORTS'
-                  : 'OWNER_PRIVATE'
-              }
-              apiFetch={apiFetch}
-              onRefresh={loadWorkspace}
-            />
-          )}
       </main>
-
-      {/* Clean Minimal Footer */}
-      <footer className="bg-white border-t border-slate-200 px-6 py-4 text-xs text-slate-500 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          ControlStock Pro · Contabilidad de Origen Único y Transacciones ACID en PostgreSQL
-        </div>
-        <div>
-          Zona Horaria Operativa: America/La_Paz · Última sincronización:{' '}
-          <span className="font-mono">
-            {formatBoliviaDateTime(workspaceData?.serverTimestamp)}
-          </span>
-        </div>
-      </footer>
     </div>
   );
 }

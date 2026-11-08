@@ -1,28 +1,32 @@
 import React, { useState, useEffect } from 'react';
 import {
-  ArrowRightLeft,
+  ArrowLeftRight,
   ClipboardCheck,
-  FileSpreadsheet,
+  History,
   Lock,
-  ShieldCheck,
+  Plus,
+  Send,
   CheckCircle2,
-  AlertTriangle,
   Download,
-  Play,
+  DollarSign,
   Users,
+  Trash2,
+  RotateCcw,
+  ShieldCheck,
+  X,
 } from 'lucide-react';
 import {
   WorkspaceData,
   formatInt,
   formatBoliviaDateTime,
-  translateStatus,
   translateRole,
+  translateStatus,
 } from '../types.ts';
 
 interface Props {
   data: WorkspaceData;
   isOnline: boolean;
-  activeSection: 'TRANSFERS_COUNTS' | 'KARDEX_REPORTS' | 'OWNER_PRIVATE';
+  initialSubView?: 'TRANSFERS' | 'KARDEX' | 'USERS' | 'PRIVATE_OWNER';
   apiFetch: (url: string, options?: RequestInit) => Promise<any>;
   onRefresh: () => Promise<void>;
 }
@@ -30,247 +34,268 @@ interface Props {
 export function OperationsAuditAndPrivateView({
   data,
   isOnline,
-  activeSection,
+  initialSubView = 'TRANSFERS',
   apiFetch,
   onRefresh,
 }: Props) {
-  const [submitting, setSubmitting] = useState(false);
-  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [subTab, setSubTab] = useState<'TRANSFERS' | 'KARDEX' | 'USERS' | 'PRIVATE_OWNER'>(
+    initialSubView
+  );
+  useEffect(() => {
+    setSubTab(initialSubView);
+  }, [initialSubView]);
 
-  // Transfers State
-  const [trFromWhId, setTrFromWhId] = useState<number>(data.warehouses[0]?.id || 0);
-  const [trFromLocId, setTrFromLocId] = useState<number>(
-    data.locations.find((l) => l.warehouseId === data.warehouses[0]?.id)?.id || 0
-  );
-  const [trToWhId, setTrToWhId] = useState<number>(
-    data.allWarehousesSummary[1]?.id || data.allWarehousesSummary[0]?.id || 0
-  );
-  const [trToLocId, setTrToLocId] = useState<number>(
-    data.allLocationsSummary.find(
-      (l) =>
-        l.warehouseId ===
-        (data.allWarehousesSummary[1]?.id || data.allWarehousesSummary[0]?.id)
-    )?.id || 0
-  );
+  const isOwnerOrAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Transfer State
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [trFromWh, setTrFromWh] = useState<number>(data.warehouses[0]?.id || 0);
+  const [trToWh, setTrToWh] = useState<number>(data.allWarehousesSummary[1]?.id || data.warehouses[0]?.id || 0);
   const [trProductId, setTrProductId] = useState<number>(data.products[0]?.id || 0);
-  const [trQty, setTrQty] = useState<number>(500);
+  const [trQty, setTrQty] = useState('10');
   const [trNotes, setTrNotes] = useState('');
-  const [trReceiveInputs, setTrReceiveInputs] = useState<Record<number, number>>({});
+  const [submittingTr, setSubmittingTr] = useState(false);
 
-  // Physical Counts State (Blind Count by Default)
+  // Physical Count State
+  const [showCountModal, setShowCountModal] = useState(false);
   const [cntWhId, setCntWhId] = useState<number>(data.warehouses[0]?.id || 0);
-  const [cntLocId, setCntLocId] = useState<number>(
-    data.locations.find((l) => l.warehouseId === data.warehouses[0]?.id)?.id || 0
-  );
-  const [cntProdId, setCntProdId] = useState<number>(data.products[0]?.id || 0);
-  const [cntQty, setCntQty] = useState<number>(0);
-  const [cntBlind, setCntBlind] = useState<boolean>(true);
-  const [cntNotes, setCntNotes] = useState('');
+  const [cntProductId, setCntProductId] = useState<number>(data.products[0]?.id || 0);
+  const [cntRealQty, setCntRealQty] = useState('0');
+  const [cntReason, setCntReason] = useState('Recuento físico de control');
+  const [submittingCnt, setSubmittingCnt] = useState(false);
 
-  // Kardex Filters
-  const [kardexSearch, setKardexSearch] = useState('');
-  const [kardexTypeFilter, setKardexTypeFilter] = useState('ALL');
+  // User Management State
+  const [showUserModal, setShowUserModal] = useState(false);
+  const [uUsername, setUUsername] = useState('');
+  const [uPassword, setUPassword] = useState('');
+  const [uFullName, setUFullName] = useState('');
+  const [uRole, setURole] = useState<string>('WAREHOUSE_MANAGER');
+  const [uWarehouseId, setUWarehouseId] = useState<string>('');
+  const [submittingUser, setSubmittingUser] = useState(false);
 
-  // Private Zone State (Strictly fetched from /api/private/overview)
-  const [privateData, setPrivateData] = useState<{
+  // Reset inventory state
+  const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [resetting, setResetting] = useState(false);
+
+  // Private Zone State
+  const [privateOverview, setPrivateOverview] = useState<{
     privateCostBatches: any[];
     securityAuditEvents: any[];
     invariantAudit: any;
   } | null>(null);
-  const [privateError, setPrivateError] = useState<string | null>(null);
+  const [loadingPrivate, setLoadingPrivate] = useState(false);
 
-  // Automated Verification Suite State
-  const [suiteRunning, setSuiteRunning] = useState(false);
-  const [suiteReport, setSuiteReport] = useState<any | null>(null);
+  // Kardex filter
+  const [kardexWhFilter, setKardexWhFilter] = useState<number | 'ALL'>('ALL');
 
-  const isOwner = data.user.role === 'OWNER' || data.user.canViewPrivateCosts;
-  const isOwnerOrAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
-
-  useEffect(() => {
-    if (activeSection === 'OWNER_PRIVATE') {
-      loadPrivateOverview();
-    }
-  }, [activeSection, data.user.id]);
-
-  const loadPrivateOverview = async () => {
-    setPrivateError(null);
-    try {
-      const res = await apiFetch('/api/private/overview');
-      setPrivateData(res);
-    } catch (err: any) {
-      setPrivateData(null);
-      setPrivateError(err.message);
-    }
+  const notify = (text: string, type: 'success' | 'error' = 'success') => {
+    setFeedback({ text, type });
+    setTimeout(() => setFeedback(null), 4000);
   };
 
-  const handleCreateTransfer = async () => {
+  useEffect(() => {
+    if (subTab === 'PRIVATE_OWNER' && data.user.canViewPrivateCosts) {
+      setLoadingPrivate(true);
+      apiFetch('/api/private/overview')
+        .then((res) => setPrivateOverview(res))
+        .catch((err) => notify(err.message, 'error'))
+        .finally(() => setLoadingPrivate(false));
+    }
+  }, [subTab, data.user.canViewPrivateCosts]);
+
+  const getDefaultLocId = (warehouseId: number) => {
+    const loc =
+      data.allLocationsSummary.find((l) => l.warehouseId === warehouseId) ||
+      data.locations.find((l) => l.warehouseId === warehouseId);
+    return loc?.id || 1;
+  };
+
+  const handleDispatchTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!isOnline) return;
-    setSubmitting(true);
-    setFeedbackMsg(null);
+    setSubmittingTr(true);
     try {
-      const res = await apiFetch('/api/transfers/dispatch', {
+      await apiFetch('/api/transfers/dispatch', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: `TRA-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          fromWarehouseId: trFromWhId,
-          fromLocationId: trFromLocId,
-          toWarehouseId: trToWhId,
-          toLocationId: trToLocId,
-          productId: trProductId,
-          quantity: trQty,
+          idempotencyKey: `tr_${Date.now()}`,
+          fromWarehouseId: Number(trFromWh),
+          fromLocationId: getDefaultLocId(Number(trFromWh)),
+          toWarehouseId: Number(trToWh),
+          toLocationId: getDefaultLocId(Number(trToWh)),
+          productId: Number(trProductId),
+          quantity: Number(trQty),
           notes: trNotes,
         }),
       });
-      setFeedbackMsg({
-        type: 'success',
-        text: res.isInternalSameWarehouse
-          ? `Cambio de ubicación interna confirmado (${res.document.folio}).`
-          : `Transferencia entre almacenes despachada (${res.document.folio}). Mercancía en tránsito esperando recepción en destino.`,
-      });
+      notify('Traslado despachado correctamente');
+      setShowTransferModal(false);
+      setTrNotes('');
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      notify(err.message, 'error');
     } finally {
-      setSubmitting(false);
+      setSubmittingTr(false);
     }
   };
 
-  const handleReceiveTransfer = async (transferId: number, defaultQty: number) => {
+  const handleReceiveTransfer = async (transferId: number, dispatchedQty: number) => {
     if (!isOnline) return;
-    const qty = trReceiveInputs[transferId] ?? defaultQty;
-    setSubmitting(true);
-    setFeedbackMsg(null);
     try {
-      const res = await apiFetch('/api/transfers/receive', {
+      await apiFetch('/api/transfers/receive', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: `REC-TRA-${transferId}-${Date.now()}`,
+          idempotencyKey: `tr_rcv_${transferId}_${Date.now()}`,
           transferId,
-          receivedQty: qty,
-          notes: 'Recepción física en almacén destino',
+          receivedQty: dispatchedQty,
+          notes: 'Recepción confirmada',
         }),
       });
-      setFeedbackMsg({
-        type: 'success',
-        text: `Transferencia recibida (${res.document.folio}).`,
-      });
+      notify('Traslado recibido y sumado al almacén destino');
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
-    } finally {
-      setSubmitting(false);
+      notify(err.message, 'error');
     }
   };
 
-  const handleSubmitCount = async () => {
+  const handleSubmitCount = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!isOnline) return;
-    setSubmitting(true);
-    setFeedbackMsg(null);
+    setSubmittingCnt(true);
     try {
       const res = await apiFetch('/api/counts/submit', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: `CNT-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          warehouseId: cntWhId,
-          locationId: cntLocId,
-          productId: cntProdId,
-          countedQty: cntQty,
-          isBlindCount: cntBlind,
-          notes: cntNotes,
+          idempotencyKey: `cnt_${Date.now()}`,
+          warehouseId: Number(cntWhId),
+          locationId: getDefaultLocId(Number(cntWhId)),
+          productId: Number(cntProductId),
+          countedQty: Number(cntRealQty),
+          isBlindCount: false,
+          notes: cntReason,
         }),
       });
-      setFeedbackMsg({
-        type: 'success',
-        text: `Expediente de conteo físico ${res.countFolio} registrado. Los ajustes de inventario requieren aprobación formal del Propietario.`,
-      });
+      if (isOwnerOrAdmin && res?.count?.id && res.count.differenceQty !== 0) {
+        await apiFetch('/api/counts/review', {
+          method: 'POST',
+          body: JSON.stringify({
+            idempotencyKey: `cnt_rev_${Date.now()}`,
+            countId: res.count.id,
+            approve: true,
+            reason: cntReason,
+          }),
+        });
+      }
+      notify('Conteo físico registrado y aplicado correctamente');
+      setShowCountModal(false);
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      notify(err.message, 'error');
     } finally {
-      setSubmitting(false);
+      setSubmittingCnt(false);
     }
   };
 
-  const handleReviewCount = async (countId: number, approve: boolean) => {
-    if (!isOnline) return;
-    setSubmitting(true);
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingUser(true);
     try {
-      await apiFetch('/api/counts/review', {
+      await apiFetch('/api/users', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: `REV-CNT-${countId}-${Date.now()}`,
-          countId,
-          approve,
-          reason: approve
-            ? 'Ajuste compensatorio aprobado por Propietario tras verificación física'
-            : 'Conteo rechazado para re-conteo',
+          username: uUsername,
+          password: uPassword,
+          fullName: uFullName,
+          role: uRole,
+          warehouseId: uWarehouseId ? Number(uWarehouseId) : null,
         }),
       });
-      setFeedbackMsg({
-        type: 'success',
-        text: approve
-          ? 'Ajuste de conteo aplicado mediante movimiento compensatorio auditado.'
-          : 'Expediente de conteo rechazado sin modificar saldos.',
-      });
+      notify('Usuario creado correctamente');
+      setShowUserModal(false);
+      setUUsername('');
+      setUPassword('');
+      setUFullName('');
       await onRefresh();
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
+      notify(err.message, 'error');
     } finally {
-      setSubmitting(false);
+      setSubmittingUser(false);
     }
   };
 
-  const handleRunVerificationSuite = async () => {
-    if (!isOnline) return;
-    setSuiteRunning(true);
-    setFeedbackMsg(null);
+  const handleDeleteUser = async (userId: number, username: string) => {
     try {
-      const res = await apiFetch('/api/Verification/run-suite', {
-        method: 'POST',
-      });
-      setSuiteReport(res);
+      await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
+      notify(`Usuario "${username}" eliminado`);
       await onRefresh();
-      if (isOwner) {
-        await loadPrivateOverview();
-      }
     } catch (err: any) {
-      setFeedbackMsg({ type: 'error', text: err.message });
-    } finally {
-      setSuiteRunning(false);
+      notify(err.message, 'error');
     }
   };
 
-  const exportKardexCsv = () => {
-    const headers = [
-      'Fecha_Hora_Bolivia',
-      'Folio_Documento',
-      'Tipo_Movimiento',
-      'SKU',
-      'Producto',
-      'Cantidad',
-      'Estado_Origen',
-      'Estado_Destino',
-      'Lote_Referencia',
-    ];
-    const rows = data.movementLines.map((line) => {
-      const doc = data.movementDocuments.find((d) => d.id === line.documentId);
-      return [
-        formatBoliviaDateTime(line.createdAt),
-        doc?.folio || `DOC-${line.documentId}`,
-        doc?.movementType || '',
-        line.historicalSku,
-        `"${line.historicalName.replace(/"/g, '""')}"`,
-        line.quantity,
-        line.fromStatus || 'INGRESO_EXTERNO',
-        line.toStatus || 'CONSUMO_PRODUCCION',
-        line.lotCode,
-      ].join(',');
-    });
-    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
+  const handleResetInventory = async () => {
+    setResetting(true);
+    try {
+      await apiFetch('/api/admin/reset-inventory', { method: 'POST', body: JSON.stringify({}) });
+      notify('Inventario reiniciado en cero correctamente');
+      setShowResetConfirm(false);
+      await onRefresh();
+    } catch (err: any) {
+      notify(err.message, 'error');
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const getProductName = (id: number) => {
+    const p = data.products.find((x) => x.id === id);
+    return p ? `${p.sku} — ${p.name}` : `#${id}`;
+  };
+
+  const getWarehouseName = (id: number | null) => {
+    if (!id) return '—';
+    const w =
+      data.allWarehousesSummary.find((x) => x.id === id) ||
+      data.warehouses.find((x) => x.id === id);
+    return w ? w.name : `#${id}`;
+  };
+
+  const enrichedLines = data.movementLines.map((line) => {
+    const doc = data.movementDocuments.find((d) => d.id === line.documentId);
+    return {
+      ...line,
+      folio: doc?.folio || `DOC-${line.documentId}`,
+      movementType: doc?.movementType || 'MOVIMIENTO',
+      notes: doc?.notes || doc?.reason || '',
+    };
+  });
+
+  const filteredLines = enrichedLines.filter((l) => {
+    if (kardexWhFilter === 'ALL') return true;
+    return l.fromWarehouseId === kardexWhFilter || l.toWarehouseId === kardexWhFilter;
+  });
+
+  const exportKardexCSV = () => {
+    const headers = ['Fecha', 'Folio', 'Tipo', 'SKU', 'Producto', 'Cantidad', 'Origen', 'Destino', 'Detalle'];
+    const rows = filteredLines.map((m) => [
+      formatBoliviaDateTime(m.createdAt),
+      m.folio,
+      m.movementType,
+      m.historicalSku,
+      `"${m.historicalName.replace(/"/g, '""')}"`,
+      m.quantity,
+      `"${getWarehouseName(m.fromWarehouseId)}"`,
+      `"${getWarehouseName(m.toWarehouseId)}"`,
+      `"${(m.notes || '').replace(/"/g, '""')}"`,
+    ]);
+    const csvContent =
+      'data:text/csv;charset=utf-8,' +
+      [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `kardex_inmutable_${new Date().toISOString().slice(0, 10)}.csv`);
+    link.setAttribute('download', `kardex_inventario_${new Date().toISOString().slice(0, 10)}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -278,913 +303,764 @@ export function OperationsAuditAndPrivateView({
 
   return (
     <div className="space-y-6">
-      {feedbackMsg && (
+      {feedback && (
         <div
-          className={`p-4 rounded-lg border text-sm flex items-center justify-between ${
-            feedbackMsg.type === 'success'
+          className={`p-4 rounded-xl border text-sm font-semibold flex items-center justify-between ${
+            feedback.type === 'success'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
               : 'bg-red-50 border-red-200 text-red-900'
           }`}
         >
-          <span>{feedbackMsg.text}</span>
-          <button
-            onClick={() => setFeedbackMsg(null)}
-            className="text-xs font-medium underline ml-4"
-          >
+          <span>{feedback.text}</span>
+          <button onClick={() => setFeedback(null)} className="text-xs underline ml-4 cursor-pointer">
             Cerrar
           </button>
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* SECTION 1: TRANSFERENCIAS ENTRE ALMACENES Y CONTEO FÍSICO A CIEGAS    */}
-      {/* ===================================================================== */}
-      {activeSection === 'TRANSFERS_COUNTS' && (
+      {/* =====================================================================
+          1. TRASLADOS Y CONTEOS FISICOS
+         ===================================================================== */}
+      {subTab === 'TRANSFERS' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {/* Transfer / Location Change Form */}
-            <div className="bg-white rounded-lg border border-slate-200 p-5 space-y-4">
-              <h2 className="text-base font-semibold text-slate-900">
-                Traslado entre Almacenes o Cambio de Ubicación Interna
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900">
+                Traslados entre Almacenes y Conteos Físicos
               </h2>
-              <p className="text-xs text-slate-600">
-                Si origen y destino pertenecen al mismo almacén (ej. Sencata Sección K → Estante 2),
-                ejecuta un cambio de ubicación inmediato y auditado. Si es hacia otro almacén, pasa
-                a estado <strong>En Tránsito</strong> hasta confirmación del receptor.
+              <p className="text-sm text-slate-500 mt-0.5">
+                Envía mercadería entre Sencata, Villa Dolores o Puente Bolivia, o cuadra el stock físico.
               </p>
+            </div>
+            <div className="flex flex-wrap gap-2.5">
+              <button
+                onClick={() => {
+                  setTrFromWh(data.warehouses[0]?.id || 0);
+                  setTrToWh(data.allWarehousesSummary[1]?.id || data.warehouses[0]?.id || 0);
+                  setTrProductId(data.products[0]?.id || 0);
+                  setShowTransferModal(true);
+                }}
+                disabled={data.products.length === 0}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-semibold rounded-xl shadow-xs cursor-pointer"
+              >
+                <Send className="w-4 h-4" />
+                Enviar a otro Almacén
+              </button>
+              <button
+                onClick={() => {
+                  setCntWhId(data.warehouses[0]?.id || 0);
+                  setCntProductId(data.products[0]?.id || 0);
+                  setShowCountModal(true);
+                }}
+                disabled={data.products.length === 0}
+                className="inline-flex items-center gap-2 px-4 py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-sm font-semibold rounded-xl shadow-xs cursor-pointer"
+              >
+                <ClipboardCheck className="w-4 h-4" />
+                Registrar Conteo Físico
+              </button>
+            </div>
+          </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Almacén Origen</label>
-                  <select
-                    value={trFromWhId}
-                    onChange={(e) => {
-                      const wId = Number(e.target.value);
-                      setTrFromWhId(wId);
-                      const loc = data.locations.find((l) => l.warehouseId === wId);
-                      if (loc) setTrFromLocId(loc.id);
-                    }}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Ubicación Origen</label>
-                  <select
-                    value={trFromLocId}
-                    onChange={(e) => setTrFromLocId(Number(e.target.value))}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.locations
-                      .filter((l) => l.warehouseId === trFromWhId)
-                      .map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.zoneName} › {l.shelfName}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Almacén Destino</label>
-                  <select
-                    value={trToWhId}
-                    onChange={(e) => {
-                      const wId = Number(e.target.value);
-                      setTrToWhId(wId);
-                      const loc = data.allLocationsSummary.find((l) => l.warehouseId === wId);
-                      if (loc) setTrToLocId(loc.id);
-                    }}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.allWarehousesSummary.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Ubicación Destino</label>
-                  <select
-                    value={trToLocId}
-                    onChange={(e) => setTrToLocId(Number(e.target.value))}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.allLocationsSummary
-                      .filter((l) => l.warehouseId === trToWhId)
-                      .map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.zoneName} › {l.shelfName}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                <div className="sm:col-span-2">
-                  <label className="block font-medium text-slate-700 mb-1">Producto (SKU)</label>
-                  <select
-                    value={trProductId}
-                    onChange={(e) => setTrProductId(Number(e.target.value))}
-                    className="w-full font-mono border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.sku} — {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Cantidad a Trasladar
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={trQty}
-                    onChange={(e) => setTrQty(Math.max(1, Number(e.target.value)))}
-                    className="w-full font-mono border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Motivo / Nota</label>
-                  <input
-                    type="text"
-                    value={trNotes}
-                    onChange={(e) => setTrNotes(e.target.value)}
-                    placeholder="Abastecimiento de taller"
-                    className="w-full border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Transfers Table */}
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+              <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/50">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ArrowLeftRight className="w-4 h-4 text-blue-600" />
+                  Traslados entre Almacenes ({data.warehouseTransfers.length})
+                </h3>
               </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  disabled={submitting || !isOnline}
-                  onClick={handleCreateTransfer}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 rounded-md hover:bg-sky-700"
-                >
-                  Confirmar Salida / Cambio de Ubicación
-                </button>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
+                      <th className="py-3 px-4">Folio / Producto</th>
+                      <th className="py-3 px-4">Ruta</th>
+                      <th className="py-3 px-4 text-right">Cant.</th>
+                      <th className="py-3 px-4 text-right">Estado / Acción</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {data.warehouseTransfers.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="py-10 text-center text-slate-400">
+                          No hay traslados registrados todavía.
+                        </td>
+                      </tr>
+                    ) : (
+                      data.warehouseTransfers.map((tr) => (
+                        <tr key={tr.id} className="hover:bg-slate-50">
+                          <td className="py-3 px-4">
+                            <div className="font-mono font-bold text-slate-800">{tr.transferFolio}</div>
+                            <div className="text-slate-600 font-medium">{getProductName(tr.productId)}</div>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600">
+                            <span className="font-semibold text-slate-800">
+                              {getWarehouseName(tr.fromWarehouseId)}
+                            </span>
+                            {' → '}
+                            <span className="font-semibold text-blue-700">
+                              {getWarehouseName(tr.toWarehouseId)}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                            {formatInt(tr.dispatchedQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            {tr.status === 'IN_TRANSIT' ? (
+                              <button
+                                onClick={() => handleReceiveTransfer(tr.id, tr.dispatchedQty)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg text-xs cursor-pointer"
+                              >
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                Confirmar Recepción
+                              </button>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-md font-semibold">
+                                Recibido
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
 
-            {/* Blind Physical Count Form */}
-            <div className="bg-white rounded-lg border border-slate-200 p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-base font-semibold text-slate-900">
-                  Conteo Físico de Inventario (Modo a Ciegas)
-                </h2>
-                <label className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={cntBlind}
-                    onChange={(e) => setCntBlind(e.target.checked)}
-                  />
-                  Conteo a ciegas (Oculta stock teórico)
-                </label>
+            {/* Physical Counts Table */}
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+              <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/50">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ClipboardCheck className="w-4 h-4 text-emerald-600" />
+                  Recuentos Físicos ({data.physicalCounts.length})
+                </h3>
               </div>
-              <p className="text-xs text-slate-600">
-                El trabajador reporta la cantidad física contada sin conocer la cantidad teórica del
-                sistema. Si existe diferencia, no altera el saldo hasta que el Propietario lo
-                apruebe.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Almacén</label>
-                  <select
-                    value={cntWhId}
-                    onChange={(e) => {
-                      const wId = Number(e.target.value);
-                      setCntWhId(wId);
-                      const loc = data.locations.find((l) => l.warehouseId === wId);
-                      if (loc) setCntLocId(loc.id);
-                    }}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Ubicación</label>
-                  <select
-                    value={cntLocId}
-                    onChange={(e) => setCntLocId(Number(e.target.value))}
-                    className="w-full border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.locations
-                      .filter((l) => l.warehouseId === cntWhId)
-                      .map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.zoneName} › {l.shelfName}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                <div className="sm:col-span-2">
-                  <label className="block font-medium text-slate-700 mb-1">Producto Contado</label>
-                  <select
-                    value={cntProdId}
-                    onChange={(e) => setCntProdId(Number(e.target.value))}
-                    className="w-full font-mono border border-slate-300 rounded px-2.5 py-2 bg-white"
-                  >
-                    {data.products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.sku} — {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Cantidad Física Contada (Piezas)
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={cntQty}
-                    onChange={(e) => setCntQty(Math.max(0, Number(e.target.value)))}
-                    className="w-full font-mono font-bold border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">Observaciones</label>
-                  <input
-                    type="text"
-                    value={cntNotes}
-                    onChange={(e) => setCntNotes(e.target.value)}
-                    placeholder="Conteo físico de estantería"
-                    className="w-full border border-slate-300 rounded px-2.5 py-2"
-                  />
-                </div>
-              </div>
-
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  disabled={submitting || !isOnline}
-                  onClick={handleSubmitCount}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800"
-                >
-                  Enviar Reporte de Conteo Físico
-                </button>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
+                      <th className="py-3 px-4">Almacén / Producto</th>
+                      <th className="py-3 px-4 text-right">Sistema</th>
+                      <th className="py-3 px-4 text-right">Contado</th>
+                      <th className="py-3 px-4 text-right">Diferencia</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {data.physicalCounts.length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="py-10 text-center text-slate-400">
+                          Sin conteos físicos registrados.
+                        </td>
+                      </tr>
+                    ) : (
+                      data.physicalCounts.map((c) => (
+                        <tr key={c.id} className="hover:bg-slate-50">
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-900">{getProductName(c.productId)}</div>
+                            <div className="text-slate-500">
+                              {getWarehouseName(c.warehouseId)} · {c.notes}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-slate-600">
+                            {formatInt(c.systemExpectedQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                            {formatInt(c.countedQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold">
+                            <span
+                              className={
+                                c.differenceQty === 0
+                                  ? 'text-slate-500'
+                                  : c.differenceQty > 0
+                                  ? 'text-emerald-600'
+                                  : 'text-red-600'
+                              }
+                            >
+                              {c.differenceQty > 0 ? `+${c.differenceQty}` : c.differenceQty}
+                            </span>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           </div>
 
-          {/* Pending Inter-Warehouse Transfers List */}
-          {data.warehouseTransfers.length > 0 && (
-            <div className="bg-white rounded-lg border border-slate-200 p-5">
-              <h3 className="text-sm font-semibold text-slate-900 mb-3">
-                Transferencias entre Almacenes ({data.warehouseTransfers.length})
-              </h3>
-              <table className="w-full text-xs text-left">
-                <thead>
-                  <tr className="text-slate-500 border-b border-slate-200">
-                    <th className="py-2">Folio</th>
-                    <th className="py-2">Producto</th>
-                    <th className="py-2">Origen → Destino</th>
-                    <th className="py-2 text-right">Enviado</th>
-                    <th className="py-2">Estado</th>
-                    <th className="py-2 text-right">Recepción</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.warehouseTransfers.map((tr) => {
-                    const p = data.products.find((pr) => pr.id === tr.productId);
-                    const fw = data.allWarehousesSummary.find((w) => w.id === tr.fromWarehouseId);
-                    const tw = data.allWarehousesSummary.find((w) => w.id === tr.toWarehouseId);
-                    return (
-                      <tr key={tr.id}>
-                        <td className="py-2 font-mono font-semibold">{tr.transferFolio}</td>
-                        <td className="py-2">
-                          <span className="font-mono">{p?.sku}</span> — {p?.name}
-                        </td>
-                        <td className="py-2">
-                          {fw?.name} → {tw?.name}
-                        </td>
-                        <td className="py-2 text-right font-mono font-bold">
-                          {formatInt(tr.dispatchedQty)}
-                        </td>
-                        <td className="py-2 font-semibold">{tr.status}</td>
-                        <td className="py-2 text-right">
-                          {tr.status === 'IN_TRANSIT' ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <input
-                                type="number"
-                                min={0}
-                                max={tr.dispatchedQty}
-                                value={trReceiveInputs[tr.id] ?? tr.dispatchedQty}
-                                onChange={(e) =>
-                                  setTrReceiveInputs({
-                                    ...trReceiveInputs,
-                                    [tr.id]: Number(e.target.value),
-                                  })
-                                }
-                                className="w-20 font-mono border border-slate-300 rounded px-2 py-1"
-                              />
-                              <button
-                                onClick={() => handleReceiveTransfer(tr.id, tr.dispatchedQty)}
-                                className="px-2.5 py-1 bg-emerald-600 text-white font-semibold rounded"
-                              >
-                                Recibir
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-slate-500">
-                              Recibido: {formatInt(tr.receivedQty)} u.
-                            </span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          {/* Transfer Modal */}
+          {showTransferModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+                  <h3 className="text-lg font-bold text-slate-900">Enviar Mercadería a otro Almacén</h3>
+                  <button
+                    onClick={() => setShowTransferModal(false)}
+                    className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                <form onSubmit={handleDispatchTransfer} className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">Desde Almacén *</label>
+                      <select
+                        value={trFromWh}
+                        onChange={(e) => setTrFromWh(Number(e.target.value))}
+                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                      >
+                        {data.warehouses.map((w) => (
+                          <option key={w.id} value={w.id}>{w.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">Hacia Almacén *</label>
+                      <select
+                        value={trToWh}
+                        onChange={(e) => setTrToWh(Number(e.target.value))}
+                        className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                      >
+                        {data.allWarehousesSummary.map((w) => (
+                          <option key={w.id} value={w.id}>{w.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Producto *</label>
+                    <select
+                      value={trProductId}
+                      onChange={(e) => setTrProductId(Number(e.target.value))}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    >
+                      {data.products.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.sku} — {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Cantidad a enviar *</label>
+                    <input
+                      type="number"
+                      min="1"
+                      required
+                      value={trQty}
+                      onChange={(e) => setTrQty(e.target.value)}
+                      className="w-full px-3 py-2 text-sm font-mono font-bold border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Observaciones</label>
+                    <input
+                      type="text"
+                      value={trNotes}
+                      onChange={(e) => setTrNotes(e.target.value)}
+                      placeholder="Ej. Envío a sucursal"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setShowTransferModal(false)}
+                      className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingTr}
+                      className="px-5 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer"
+                    >
+                      {submittingTr ? 'Enviando...' : 'Despachar Traslado'}
+                    </button>
+                  </div>
+                </form>
+              </div>
             </div>
           )}
 
-          {/* Physical Counts Review Table */}
-          {data.physicalCounts.length > 0 && (
-            <div className="bg-white rounded-lg border border-slate-200 p-5">
-              <h3 className="text-sm font-semibold text-slate-900 mb-3">
-                Expedientes de Conteo Físico y Ajustes Sujetos a Aprobación
-              </h3>
-              <table className="w-full text-xs text-left">
-                <thead>
-                  <tr className="text-slate-500 border-b border-slate-200">
-                    <th className="py-2">Folio Conteo</th>
-                    <th className="py-2">Producto / Almacén</th>
-                    <th className="py-2 text-right">Contado Físico</th>
-                    <th className="py-2 text-right">Stock Sistema</th>
-                    <th className="py-2 text-right">Diferencia</th>
-                    <th className="py-2">Estado</th>
-                    <th className="py-2 text-right">Autorización Propietario</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.physicalCounts.map((cnt) => {
-                    const p = data.products.find((pr) => pr.id === cnt.productId);
-                    const w = data.warehouses.find((wh) => wh.id === cnt.warehouseId);
-                    return (
-                      <tr key={cnt.id}>
-                        <td className="py-2 font-mono font-semibold">{cnt.countFolio}</td>
-                        <td className="py-2">
-                          {p?.sku} ({w?.name})
-                        </td>
-                        <td className="py-2 text-right font-mono font-bold">
-                          {formatInt(cnt.countedQty)}
-                        </td>
-                        <td className="py-2 text-right font-mono">
-                          {cnt.systemExpectedQty === -1
-                            ? 'Oculto (Conteo a ciegas)'
-                            : formatInt(cnt.systemExpectedQty)}
-                        </td>
-                        <td className="py-2 text-right font-mono font-bold">
-                          {cnt.systemExpectedQty === -1
-                            ? '—'
-                            : `${cnt.differenceQty > 0 ? '+' : ''}${formatInt(cnt.differenceQty)}`}
-                        </td>
-                        <td className="py-2 font-semibold">{cnt.status}</td>
-                        <td className="py-2 text-right">
-                          {cnt.status === 'PENDING_APPROVAL' && isOwnerOrAdmin ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <button
-                                onClick={() => handleReviewCount(cnt.id, true)}
-                                className="px-2.5 py-1 bg-emerald-600 text-white font-semibold rounded"
-                              >
-                                Aprobar Ajuste
-                              </button>
-                              <button
-                                onClick={() => handleReviewCount(cnt.id, false)}
-                                className="px-2.5 py-1 bg-red-600 text-white font-semibold rounded"
-                              >
-                                Rechazar
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-slate-400">Revisado</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+          {/* Count Modal */}
+          {showCountModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+                  <h3 className="text-lg font-bold text-slate-900">Registrar Conteo Físico</h3>
+                  <button
+                    onClick={() => setShowCountModal(false)}
+                    className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+                <form onSubmit={handleSubmitCount} className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Almacén *</label>
+                    <select
+                      value={cntWhId}
+                      onChange={(e) => setCntWhId(Number(e.target.value))}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    >
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Producto *</label>
+                    <select
+                      value={cntProductId}
+                      onChange={(e) => setCntProductId(Number(e.target.value))}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    >
+                      {data.products.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.sku} — {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Cantidad Física Contada *
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      required
+                      value={cntRealQty}
+                      onChange={(e) => setCntRealQty(e.target.value)}
+                      className="w-full px-3 py-2 text-sm font-mono font-bold border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Motivo / Observación *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={cntReason}
+                      onChange={(e) => setCntReason(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setShowCountModal(false)}
+                      className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingCnt}
+                      className="px-5 py-2 text-sm font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-xl cursor-pointer"
+                    >
+                      {submittingCnt ? 'Guardando...' : 'Guardar y Cuadrar Stock'}
+                    </button>
+                  </div>
+                </form>
+              </div>
             </div>
           )}
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* SECTION 2: KARDEX INMUTABLE, REPORTES DE PRODUCCIÓN Y SUITE CASOS A-H */}
-      {/* ===================================================================== */}
-      {activeSection === 'KARDEX_REPORTS' && (
+      {/* =====================================================================
+          2. KARDEX E HISTORIAL DE MOVIMIENTOS
+         ===================================================================== */}
+      {subTab === 'KARDEX' && (
         <div className="space-y-6">
-          {/* Monthly / Confirmed Production Report (Anti-double-counting guarantee) */}
-          <div className="bg-white rounded-lg border border-slate-200 p-5">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h2 className="text-base font-semibold text-slate-900">
-                  Reporte Consolidado de Producción por Marca, Modelo y Capacidad
-                </h2>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Calculado exclusivamente sobre <strong>lotes de producción confirmados</strong>{' '}
-                  (sin duplicar cantidades al despachar o recoger los productos terminados).
-                </p>
-              </div>
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                <History className="w-5 h-5 text-blue-600" />
+                Historial General de Movimientos (Kardex)
+              </h2>
+              <p className="text-sm text-slate-500 mt-0.5">
+                Registro auditable de todas las entradas, salidas, producciones y entregas.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <select
+                value={kardexWhFilter}
+                onChange={(e) =>
+                  setKardexWhFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
+                }
+                className="px-3 py-2 text-xs font-semibold border border-slate-200 rounded-xl bg-slate-50"
+              >
+                <option value="ALL">Todos los Almacenes</option>
+                {data.warehouses.map((w) => (
+                  <option key={w.id} value={w.id}>{w.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={exportKardexCSV}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                Exportar Excel (CSV)
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
+                    <th className="py-3.5 px-4">Fecha / Hora</th>
+                    <th className="py-3.5 px-4">Folio / Tipo</th>
+                    <th className="py-3.5 px-4">Producto</th>
+                    <th className="py-3.5 px-4">Origen → Destino</th>
+                    <th className="py-3.5 px-4 text-right">Cantidad</th>
+                    <th className="py-3.5 px-4">Detalle</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {filteredLines.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-slate-400">
+                        No hay movimientos registrados todavía.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredLines.map((m) => (
+                      <tr key={m.id} className="hover:bg-slate-50">
+                        <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
+                          {formatBoliviaDateTime(m.createdAt)}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-mono font-bold text-slate-800">{m.folio}</div>
+                          <span className="inline-flex px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-700">
+                            {m.movementType}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="font-semibold text-slate-900">{m.historicalName}</div>
+                          <div className="font-mono text-[11px] text-slate-400">{m.historicalSku}</div>
+                        </td>
+                        <td className="py-3 px-4 text-slate-600">
+                          {getWarehouseName(m.fromWarehouseId)} → {getWarehouseName(m.toWarehouseId)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                          {formatInt(m.quantity)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-600">{m.notes}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          3. GESTION DE USUARIOS Y ACCESOS
+         ===================================================================== */}
+      {subTab === 'USERS' && (
+        <div className="space-y-6">
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                <Users className="w-5 h-5 text-blue-600" />
+                Usuarios, Operarios y Permisos
+              </h2>
+              <p className="text-sm text-slate-500 mt-0.5">
+                Administra las cuentas de acceso para encargados de almacén, producción o recogida.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5">
+              {data.user.role === 'OWNER' && (
+                <button
+                  onClick={() => setShowResetConfirm(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2.5 border border-red-200 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-semibold rounded-xl cursor-pointer"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Reiniciar Inventario en Cero
+                </button>
+              )}
               {isOwnerOrAdmin && (
                 <button
-                  type="button"
-                  disabled={suiteRunning || !isOnline}
-                  onClick={handleRunVerificationSuite}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-md hover:bg-slate-800 flex items-center gap-2"
+                  onClick={() => setShowUserModal(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl shadow-xs cursor-pointer"
                 >
-                  <Play className="w-3.5 h-3.5" />
-                  {suiteRunning
-                    ? 'Ejecutando Casos A–H en PostgreSQL...'
-                    : 'Ejecutar Batería Automática de Casos A–H'}
+                  <Plus className="w-4 h-4" />
+                  Nuevo Usuario
                 </button>
               )}
             </div>
+          </div>
 
-            {/* Automated Verification Suite Report */}
-            {suiteReport && (
-              <div className="mt-4 p-4 bg-slate-50 border border-slate-300 rounded-lg space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-bold text-emerald-800 flex items-center gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                    Resultado de Pruebas Transaccionales en Cloud SQL PostgreSQL: 100% Verificado
-                  </div>
-                  <span className="text-xs font-mono text-slate-500">
-                    Saldos auditados: {suiteReport.auditReport?.checkedBalancesCount} · Líneas
-                    Ledger: {suiteReport.auditReport?.checkedLedgerLinesCount}
-                  </span>
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
+                  <th className="py-3.5 px-4">Usuario (Login)</th>
+                  <th className="py-3.5 px-4">Nombre Completo</th>
+                  <th className="py-3.5 px-4">Rol en el Sistema</th>
+                  <th className="py-3.5 px-4">Almacenes Permitidos</th>
+                  <th className="py-3.5 px-4 text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-sm">
+                {data.usersPublic.map((u) => {
+                  const perms = data.userWarehousePermissions.filter((p) => p.userId === u.id);
+                  return (
+                    <tr key={u.id} className="hover:bg-slate-50">
+                      <td className="py-3.5 px-4 font-mono font-bold text-slate-900">{u.username}</td>
+                      <td className="py-3.5 px-4 font-medium text-slate-800">{u.fullName}</td>
+                      <td className="py-3.5 px-4">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          {translateRole(u.role)}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4 text-slate-600 text-xs">
+                        {u.role === 'OWNER' || u.role === 'ADMIN'
+                          ? 'Todos los almacenes'
+                          : perms.map((p) => getWarehouseName(p.warehouseId)).join(', ') || 'Sin asignar'}
+                      </td>
+                      <td className="py-3.5 px-4 text-right">
+                        {u.username !== 'admin' && data.user.role === 'OWNER' && (
+                          <button
+                            onClick={() => handleDeleteUser(u.id, u.username)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Eliminar
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Create User Modal */}
+          {showUserModal && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
+                  <h3 className="text-lg font-bold text-slate-900">Crear Nuevo Usuario</h3>
+                  <button
+                    onClick={() => setShowUserModal(false)}
+                    className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-xs">
-                  {suiteReport.testResults.map((tr: any) => (
-                    <div
-                      key={tr.caseCode}
-                      className="p-3 bg-white rounded border border-slate-200 flex items-start gap-2.5"
-                    >
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                      <div>
-                        <div className="font-semibold text-slate-900">
-                          {tr.caseCode}: {tr.title}
-                        </div>
-                        <div className="text-slate-600 mt-0.5">{tr.details}</div>
-                      </div>
+                <form onSubmit={handleCreateUser} className="space-y-4">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        Usuario (Login) *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={uUsername}
+                        onChange={(e) => setUUsername(e.target.value)}
+                        placeholder="Ej. juan"
+                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl"
+                      />
                     </div>
-                  ))}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        Contraseña *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={uPassword}
+                        onChange={(e) => setUPassword(e.target.value)}
+                        placeholder="Ej. 1234"
+                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Nombre Completo *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={uFullName}
+                      onChange={(e) => setUFullName(e.target.value)}
+                      placeholder="Ej. Juan Pérez"
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Rol *</label>
+                    <select
+                      value={uRole}
+                      onChange={(e) => setURole(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    >
+                      <option value="WAREHOUSE_MANAGER">Encargado de Almacén</option>
+                      <option value="PRODUCTION_MANAGER">Encargado de Producción (Taller)</option>
+                      <option value="OPERATOR">Operario de Taller</option>
+                      <option value="ADMIN">Administrador Operativo</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                      Almacén Asignado
+                    </label>
+                    <select
+                      value={uWarehouseId}
+                      onChange={(e) => setUWarehouseId(e.target.value)}
+                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                    >
+                      <option value="">Seleccionar almacén...</option>
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>{w.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                    <button
+                      type="button"
+                      onClick={() => setShowUserModal(false)}
+                      className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={submittingUser}
+                      className="px-5 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer"
+                    >
+                      {submittingUser ? 'Guardando...' : 'Crear Usuario'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {/* Reset Inventory Confirm Modal */}
+          {showResetConfirm && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+                <h3 className="text-lg font-bold text-slate-900">
+                  ¿Reiniciar Todo el Inventario en Cero?
+                </h3>
+                <p className="text-sm text-slate-600 mt-2">
+                  Esta acción vaciará todos los productos, lotes, órdenes y movimientos, dejando tus almacenes y clasificaciones limpios en cero.
+                </p>
+                <div className="flex justify-end gap-2 mt-6">
+                  <button
+                    onClick={() => setShowResetConfirm(false)}
+                    className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    onClick={handleResetInventory}
+                    disabled={resetting}
+                    className="px-5 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl cursor-pointer"
+                  >
+                    {resetting ? 'Reiniciando...' : 'Sí, dejar todo en cero'}
+                  </button>
                 </div>
               </div>
-            )}
-
-            {/* Production Summary by SKU */}
-            <div className="mt-4 overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead>
-                  <tr className="text-slate-500 border-b border-slate-200">
-                    <th className="py-2 pr-3">SKU Producto Terminado</th>
-                    <th className="py-2 px-3">Marca / Modelo / Capacidad</th>
-                    <th className="py-2 px-3 text-right">Lotes Confirmados</th>
-                    <th className="py-2 px-3 text-right">Total Fabricado</th>
-                    <th className="py-2 px-3 text-right">Pendiente de Recoger en Taller</th>
-                    <th className="py-2 pl-3 text-right">Recibido en Almacén Destino</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.products
-                    .filter((p) => p.productType === 'FINISHED_GOOD')
-                    .map((fp) => {
-                      const batchesForSku = data.productionBatches.filter(
-                        (b) => b.finishedProductId === fp.id
-                      );
-                      const totalFabricated = batchesForSku.reduce(
-                        (s, b) => s + b.quantityProduced,
-                        0
-                      );
-                      const pendingPickup = data.balances
-                        .filter(
-                          (b) =>
-                            b.productId === fp.id && b.status === 'FINISHED_PENDING_PICKUP'
-                        )
-                        .reduce((s, b) => s + b.quantity, 0);
-                      const receivedAvailable = data.balances
-                        .filter((b) => b.productId === fp.id && b.status === 'AVAILABLE')
-                        .reduce((s, b) => s + b.quantity, 0);
-
-                      return (
-                        <tr key={fp.id} className="hover:bg-slate-50">
-                          <td className="py-2.5 pr-3 font-mono font-semibold text-slate-900">
-                            {fp.sku}
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-700">
-                            {fp.brand} · {fp.model} · <strong>{fp.capacity}</strong> ({fp.material})
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono tabular-nums">
-                            {batchesForSku.length}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900 tabular-nums">
-                            {formatInt(totalFabricated)}
-                          </td>
-                          <td className="py-2.5 px-3 text-right font-mono font-semibold text-indigo-700 tabular-nums">
-                            {formatInt(pendingPickup)}
-                          </td>
-                          <td className="py-2.5 pl-3 text-right font-mono font-semibold text-emerald-700 tabular-nums">
-                            {formatInt(receivedAvailable)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
             </div>
-          </div>
-
-          {/* Immutable Kardex / Ledger History */}
-          <div className="bg-white rounded-lg border border-slate-200 p-5 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h3 className="text-base font-semibold text-slate-900">
-                  Libro Mayor Inmutable de Movimientos (Kardex Auditado)
-                </h3>
-                <p className="text-xs text-slate-600">
-                  Ningún movimiento confirmado puede eliminarse. Las horas corresponden al reloj UTC
-                  del servidor convertidas a hora oficial de Bolivia (America/La_Paz).
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={exportKardexCsv}
-                className="px-3.5 py-2 text-xs font-semibold bg-white border border-slate-300 text-slate-800 rounded-md hover:bg-slate-50 flex items-center gap-2"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Exportar Kardex CSV (Sin Costos)
-              </button>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-3">
-              <input
-                type="text"
-                value={kardexSearch}
-                onChange={(e) => setKardexSearch(e.target.value)}
-                placeholder="Filtrar por SKU, folio, lote o producto..."
-                className="flex-1 min-w-[220px] text-xs border border-slate-300 rounded px-3 py-2"
-              />
-              <select
-                value={kardexTypeFilter}
-                onChange={(e) => setKardexTypeFilter(e.target.value)}
-                className="text-xs border border-slate-300 rounded px-3 py-2 bg-white"
-              >
-                <option value="ALL">Todos los tipos de movimiento</option>
-                <option value="INGRESO_PROVEEDOR">INGRESO_PROVEEDOR</option>
-                <option value="RESERVA_OP">RESERVA_OP</option>
-                <option value="DESPACHO_OP">DESPACHO_OP</option>
-                <option value="ACEPTACION_OP">ACEPTACION_OP</option>
-                <option value="PRODUCCION_LOTE">PRODUCCION_LOTE</option>
-                <option value="DESPACHO_TERMINADO">DESPACHO_TERMINADO</option>
-                <option value="RECEPCION_TERMINADO">RECEPCION_TERMINADO</option>
-                <option value="RETORNO_INSUMO_OP">RETORNO_INSUMO_OP</option>
-              </select>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs text-left">
-                <thead>
-                  <tr className="text-slate-500 border-b border-slate-200">
-                    <th className="py-2 pr-3">Fecha / Hora Servidor (BO)</th>
-                    <th className="py-2 px-3">Folio Documento</th>
-                    <th className="py-2 px-3">Operación</th>
-                    <th className="py-2 px-3">SKU / Producto</th>
-                    <th className="py-2 px-3">Transición de Custodia / Estado</th>
-                    <th className="py-2 pl-3 text-right">Cantidad</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.movementLines
-                    .filter((line) => {
-                      const doc = data.movementDocuments.find((d) => d.id === line.documentId);
-                      if (
-                        kardexTypeFilter !== 'ALL' &&
-                        doc?.movementType !== kardexTypeFilter
-                      ) {
-                        return false;
-                      }
-                      const q = kardexSearch.toLowerCase().trim();
-                      if (!q) return true;
-                      return (
-                        line.historicalSku.toLowerCase().includes(q) ||
-                        line.historicalName.toLowerCase().includes(q) ||
-                        line.lotCode.toLowerCase().includes(q) ||
-                        (doc?.folio || '').toLowerCase().includes(q)
-                      );
-                    })
-                    .slice(0, 80)
-                    .map((line) => {
-                      const doc = data.movementDocuments.find((d) => d.id === line.documentId);
-                      return (
-                        <tr key={line.id} className="hover:bg-slate-50">
-                          <td className="py-2 pr-3 font-mono text-slate-600 whitespace-nowrap">
-                            {formatBoliviaDateTime(line.createdAt)}
-                          </td>
-                          <td className="py-2 px-3 font-mono font-semibold text-slate-900">
-                            {doc?.folio || `DOC-${line.documentId}`}
-                          </td>
-                          <td className="py-2 px-3 font-medium text-slate-700">
-                            {doc?.movementType}
-                          </td>
-                          <td className="py-2 px-3">
-                            <span className="font-mono font-semibold">{line.historicalSku}</span> —{' '}
-                            {line.historicalName}
-                          </td>
-                          <td className="py-2 px-3 text-slate-600">
-                            {line.fromStatus
-                              ? translateStatus(line.fromStatus)
-                              : 'Ingreso Externo'}{' '}
-                            →{' '}
-                            <strong className="text-slate-900">
-                              {line.toStatus
-                                ? translateStatus(line.toStatus)
-                                : 'Consumido en Transformación'}
-                            </strong>
-                          </td>
-                          <td className="py-2 pl-3 text-right font-mono font-bold text-slate-900 tabular-nums">
-                            {formatInt(line.quantity)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
-            </div>
-          </div>
+          )}
         </div>
       )}
 
-      {/* ===================================================================== */}
-      {/* SECTION 3: ZONA PRIVADA DEL PROPIETARIO (COMPRAS, COSTOS Y SEGURIDAD) */}
-      {/* ===================================================================== */}
-      {activeSection === 'OWNER_PRIVATE' && (
+      {/* =====================================================================
+          4. ZONA PRIVADA DEL PROPIETARIO (COSTOS CONFIDENCIALES)
+         ===================================================================== */}
+      {subTab === 'PRIVATE_OWNER' && (
         <div className="space-y-6">
-          {privateError ? (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-sm text-red-900 flex items-center gap-3">
-              <Lock className="w-5 h-5 text-red-600 shrink-0" />
-              <div>
-                <div className="font-semibold">Acceso Restringido a nivel de Servidor (403)</div>
-                <div className="text-xs mt-1">{privateError}</div>
+          <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/20 text-amber-300 text-xs font-bold mb-2">
+                <Lock className="w-3.5 h-3.5" />
+                ZONA PRIVADA DEL ADMINISTRADOR PRINCIPAL
               </div>
+              <h2 className="text-xl font-bold">Costos de Importación / Compra por Lote</h2>
+              <p className="text-sm text-slate-300 mt-0.5">
+                Los costos registrados al ingresar mercadería solo son visibles en esta bóveda privada.
+              </p>
             </div>
-          ) : (
-            <>
-              <div className="bg-slate-900 text-white rounded-lg p-5 flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <div className="text-xs font-mono text-sky-400">
-                    ZONA PRIVADA DEL PROPIETARIO · UN SOLO ORIGEN DE VERDAD
-                  </div>
-                  <h2 className="text-lg font-semibold mt-0.5">
-                    Control de Componentes Estratégicos, Costos de Importación y Auditoría
-                  </h2>
-                  <p className="text-xs text-slate-300 mt-1">
-                    Los saldos que ve aquí provienen del mismo libro contable del sistema, sin
-                    duplicar inventarios. Los campos financieros de compra/póliza están aislados en
-                    servidor y jamás se envían a las sesiones de empleados.
-                  </p>
-                </div>
+          </div>
 
-                {privateData?.invariantAudit && (
-                  <div className="px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-md text-xs">
-                    <div className="text-emerald-400 font-semibold flex items-center gap-1.5">
-                      <ShieldCheck className="w-4 h-4" />
-                      Auditoría Matemática Ledger: {privateData.invariantAudit.isHealthy ? 'ÍNTEGRA' : 'ALERTA'}
-                    </div>
-                    <div className="font-mono text-slate-300 mt-0.5">
-                      {privateData.invariantAudit.checkedBalancesCount} saldos =={' '}
-                      {privateData.invariantAudit.checkedLedgerLinesCount} movimientos
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Consolidated Strategic Components Custody (UDP 8/16/32GB & microSD) */}
-              <div className="bg-white rounded-lg border border-slate-200 p-5">
-                <h3 className="text-base font-semibold text-slate-900 mb-3">
-                  Balance Consolidado de Componentes Estratégicos (Custodia Propia vs. Producción)
-                </h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-left">
-                    <thead>
-                      <tr className="text-slate-500 border-b border-slate-200">
-                        <th className="py-2 pr-3">SKU Estratégico</th>
-                        <th className="py-2 px-3">Descripción</th>
-                        <th className="py-2 px-3 text-right">Libre Sin Asignar (Origen)</th>
-                        <th className="py-2 px-3 text-right">Reservado en Órdenes</th>
-                        <th className="py-2 px-3 text-right">En Custodia de Producción</th>
-                        <th className="py-2 px-3 text-right">En Discrepancia</th>
-                        <th className="py-2 pl-3 text-right">Transformado en Terminados</th>
+          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/50">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <DollarSign className="w-4 h-4 text-amber-600" />
+                Lotes con Costos Registrados ({privateOverview?.privateCostBatches?.length || 0})
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
+                    <th className="py-3.5 px-4">Código Lote</th>
+                    <th className="py-3.5 px-4">Producto</th>
+                    <th className="py-3.5 px-4">Proveedor</th>
+                    <th className="py-3.5 px-4 text-right">Cantidad</th>
+                    <th className="py-3.5 px-4 text-right">Costo Unitario</th>
+                    <th className="py-3.5 px-4 text-right">Costo Total Lote</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {loadingPrivate ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-slate-400">
+                        Cargando costos privados...
+                      </td>
+                    </tr>
+                  ) : !privateOverview?.privateCostBatches ||
+                    privateOverview.privateCostBatches.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-slate-400">
+                        No hay lotes con costos privados registrados aún. Puedes registrar el costo al ingresar stock de cualquier producto.
+                      </td>
+                    </tr>
+                  ) : (
+                    privateOverview.privateCostBatches.map((b: any) => (
+                      <tr key={b.id} className="hover:bg-slate-50">
+                        <td className="py-3 px-4 font-mono font-bold text-slate-900">{b.batchCode}</td>
+                        <td className="py-3 px-4 font-semibold text-slate-900">
+                          {getProductName(b.productId)}
+                        </td>
+                        <td className="py-3 px-4 text-slate-600">{b.supplierName || '—'}</td>
+                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                          {formatInt(b.quantityReceived)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono font-semibold text-emerald-700">
+                          {((b.unitPurchaseCostCents + b.unitImportExpenseCents) / 100).toFixed(2)}{' '}
+                          {b.currency}
+                        </td>
+                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                          {(b.totalLandedCostCents / 100).toFixed(2)} {b.currency}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {data.products
-                        .filter((p) => p.productType === 'STRATEGIC_COMPONENT')
-                        .map((sp) => {
-                          const bals = data.balances.filter((b) => b.productId === sp.id);
-                          const freeOrigin = bals
-                            .filter((b) => b.status === 'AVAILABLE')
-                            .reduce((s, b) => s + b.quantity, 0);
-                          const reserved = bals
-                            .filter((b) => b.status === 'RESERVED_ORDER')
-                            .reduce((s, b) => s + b.quantity, 0);
-                          const inProd = bals
-                            .filter(
-                              (b) =>
-                                b.status === 'IN_PRODUCTION_CUSTODY' ||
-                                b.status === 'IN_TRANSIT_PRODUCTION'
-                            )
-                            .reduce((s, b) => s + b.quantity, 0);
-                          const discrep = bals
-                            .filter((b) => b.status === 'DISCREPANCY_HOLD')
-                            .reduce((s, b) => s + b.quantity, 0);
-                          const consumedTotal = data.productionOrders
-                            .filter((o) => o.strategicProductId === sp.id)
-                            .reduce((s, o) => s + o.consumedQty, 0);
-
-                          return (
-                            <tr key={sp.id}>
-                              <td className="py-2.5 pr-3 font-mono font-bold text-slate-900">
-                                {sp.sku}
-                              </td>
-                              <td className="py-2.5 px-3">{sp.name}</td>
-                              <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-700 tabular-nums">
-                                {formatInt(freeOrigin)}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-mono text-amber-700 tabular-nums">
-                                {formatInt(reserved)}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-mono font-bold text-sky-700 tabular-nums">
-                                {formatInt(inProd)}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-mono text-red-600 tabular-nums">
-                                {formatInt(discrep)}
-                              </td>
-                              <td className="py-2.5 pl-3 text-right font-mono font-bold text-slate-900 tabular-nums">
-                                {formatInt(consumedTotal)}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Private Purchase & Landed Cost Batches */}
-              <div className="bg-white rounded-lg border border-slate-200 p-5">
-                <h3 className="text-base font-semibold text-slate-900 mb-3">
-                  Lotes Privados de Compra e Importación (FOB + Flete + Póliza + Costo Unitario)
-                </h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-left">
-                    <thead>
-                      <tr className="text-slate-500 border-b border-slate-200">
-                        <th className="py-2">Código Lote</th>
-                        <th className="py-2">Producto</th>
-                        <th className="py-2">Proveedor / Póliza</th>
-                        <th className="py-2 text-right">Cantidad</th>
-                        <th className="py-2 text-right">FOB Total</th>
-                        <th className="py-2 text-right">Flete + Póliza + Otros</th>
-                        <th className="py-2 text-right">Costo Total Puesto</th>
-                        <th className="py-2 text-right">Costo Unitario (USD)</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {(privateData?.privateCostBatches || []).map((cb: any) => {
-                        const prod = data.products.find((p) => p.id === cb.productId);
-                        const extras =
-                          Number(cb.freightCost) +
-                          Number(cb.customsPolicyCost) +
-                          Number(cb.otherImportExpenses);
-                        return (
-                          <tr key={cb.id}>
-                            <td className="py-2 font-mono font-semibold">{cb.batchCode}</td>
-                            <td className="py-2">
-                              <span className="font-mono">{prod?.sku}</span> — {prod?.name}
-                            </td>
-                            <td className="py-2">
-                              {cb.supplierName} ({cb.containerOrPolicyRef})
-                            </td>
-                            <td className="py-2 text-right font-mono font-bold tabular-nums">
-                              {formatInt(cb.quantityPurchased)}
-                            </td>
-                            <td className="py-2 text-right font-mono tabular-nums">
-                              ${Number(cb.fobTotalCost).toFixed(2)}
-                            </td>
-                            <td className="py-2 text-right font-mono tabular-nums">
-                              ${extras.toFixed(2)}
-                            </td>
-                            <td className="py-2 text-right font-mono font-bold text-slate-900 tabular-nums">
-                              ${Number(cb.totalLandedCost).toFixed(2)}
-                            </td>
-                            <td className="py-2 text-right font-mono font-bold text-emerald-700 tabular-nums">
-                              ${Number(cb.unitLandedCost).toFixed(4)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Matrix of Users & Warehouse Permissions + Security Audit Log */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-white rounded-lg border border-slate-200 p-5">
-                  <h3 className="text-sm font-semibold text-slate-900 mb-3">
-                    Usuarios y Matriz de Permisos por Almacén
-                  </h3>
-                  <div className="space-y-2.5 text-xs">
-                    {data.usersPublic.map((u) => {
-                      const uPerms = data.userWarehousePermissions.filter(
-                        (p) => p.userId === u.id
-                      );
-                      return (
-                        <div
-                          key={u.id}
-                          className="p-3 bg-slate-50 rounded border border-slate-200 flex items-center justify-between"
-                        >
-                          <div>
-                            <div className="font-semibold text-slate-900">
-                              {u.fullName} (@{u.username})
-                            </div>
-                            <div className="text-slate-600">{translateRole(u.role)}</div>
-                          </div>
-                          <div className="text-right text-[11px] text-slate-600">
-                            {u.role === 'OWNER' || u.role === 'ADMIN'
-                              ? 'Acceso Global Multi-Almacén'
-                              : uPerms
-                                  .map((p) => {
-                                    const w = data.allWarehousesSummary.find(
-                                      (wh) => wh.id === p.warehouseId
-                                    );
-                                    return w?.name;
-                                  })
-                                  .join(', ') || 'Sin almacén'}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <div className="bg-white rounded-lg border border-slate-200 p-5">
-                  <h3 className="text-sm font-semibold text-slate-900 mb-3">
-                    Registro de Eventos de Seguridad y Accesos Denegados
-                  </h3>
-                  <div className="space-y-2 max-h-64 overflow-y-auto text-xs">
-                    {(privateData?.securityAuditEvents || []).map((ev: any) => (
-                      <div
-                        key={ev.id}
-                        className="p-2.5 bg-slate-50 rounded border border-slate-200 flex items-start justify-between gap-2"
-                      >
-                        <div>
-                          <span className="font-mono font-semibold text-slate-900">
-                            [{ev.eventType}]
-                          </span>{' '}
-                          <span className="text-slate-700">{ev.details}</span>
-                          <div className="text-[11px] text-slate-500 font-mono">
-                            Usuario: {ev.username} · Endpoint: {ev.endpoint}
-                          </div>
-                        </div>
-                        <span className="font-mono text-[11px] text-slate-500 shrink-0">
-                          {formatBoliviaDateTime(ev.createdAt)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </>
-          )}
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       )}
     </div>
