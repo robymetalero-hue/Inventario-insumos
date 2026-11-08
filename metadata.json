@@ -1,0 +1,6 @@
+{
+  "name": "ControlStock Pro - Inventario y Producción",
+  "description": "Sistema web transaccional de inventario de insumos tecnológicos, almacenes, recetas de ensamblaje y órdenes de producción.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
