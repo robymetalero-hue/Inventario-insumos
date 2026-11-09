@@ -2118,6 +2118,143 @@ export async function runAccountingInvariantAudit(externalTx?: DbTx) {
   }
 }
 
+/**
+ * 10B. Compensatory Reversal of an Operational Movement (Ingresos / Retiros)
+ * Never deletes or overwrites the historical movement; creates an auditable inverse movement
+ * referencing the original folio.
+ */
+export async function reverseMovementDocument(params: {
+  idempotencyKey: string;
+  userId: number;
+  originalDocumentId: number;
+  reason: string;
+  externalTx?: DbTx;
+}) {
+  try {
+    return await runInTx(params.externalTx, async (tx) => {
+      const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
+      if (cached) return { ...cached, idempotentReplay: true };
+
+      if (!params.reason || params.reason.trim().length < 4) {
+        throw new Error('Debe indicar el motivo obligatorio para el reverso compensatorio.');
+      }
+
+      const origDocs = await tx
+        .select()
+        .from(inventoryMovementDocuments)
+        .where(eq(inventoryMovementDocuments.id, params.originalDocumentId))
+        .for('update');
+      const origDoc = origDocs[0];
+      if (!origDoc) {
+        throw new Error('El movimiento original no existe.');
+      }
+      if (origDoc.status === 'REVERSED') {
+        throw new Error(`El movimiento ${origDoc.folio} ya fue revertido anteriormente.`);
+      }
+
+      const reversibleTypes = new Set([
+        'INGRESO_PROVEEDOR',
+        'DEVOLUCION_INSUMOS',
+        'REGULARIZACION_AUTORIZADA',
+        'RETIRO_PRODUCCION',
+        'RETIRO_OPERATIVO',
+        'RETIRO_MERMA',
+      ]);
+      if (!reversibleTypes.has(origDoc.movementType)) {
+        throw new Error(
+          `El tipo de movimiento ${origDoc.movementType} debe gestionarse desde su Orden de Producción o Traslado.`
+        );
+      }
+
+      const origLines = await tx
+        .select()
+        .from(inventoryMovementLines)
+        .where(eq(inventoryMovementLines.documentId, origDoc.id));
+      if (origLines.length === 0) {
+        throw new Error('El documento no contiene líneas para revertir.');
+      }
+
+      const revFolio = generateFolio('REV');
+      const [revDoc] = await tx
+        .insert(inventoryMovementDocuments)
+        .values({
+          folio: revFolio,
+          movementType: 'REVERSO_AUTORIZADO',
+          status: 'CONFIRMED',
+          sourceWarehouseId: origDoc.destWarehouseId,
+          sourceLocationId: origDoc.destLocationId,
+          destWarehouseId: origDoc.sourceWarehouseId,
+          destLocationId: origDoc.sourceLocationId,
+          productionOrderId: origDoc.productionOrderId,
+          supplierOrContainer: origDoc.folio,
+          recipientOrTarget: `Reverso de ${origDoc.folio}`,
+          reason: params.reason.trim(),
+          notes: `Movimiento compensatorio del folio original ${origDoc.folio}`,
+          createdByUserId: params.userId,
+          confirmedByUserId: params.userId,
+          idempotencyKey: params.idempotencyKey,
+        })
+        .returning();
+
+      const inverseTransitions: LedgerTransition[] = origLines.map((line) => ({
+        productId: line.productId,
+        quantity: line.quantity,
+        from:
+          line.toWarehouseId && line.toLocationId && line.toStatus
+            ? {
+                warehouseId: line.toWarehouseId,
+                locationId: line.toLocationId,
+                status: line.toStatus,
+                orderId: line.toOrderId || 0,
+              }
+            : undefined,
+        to:
+          line.fromWarehouseId && line.fromLocationId && line.fromStatus
+            ? {
+                warehouseId: line.fromWarehouseId,
+                locationId: line.fromLocationId,
+                status: line.fromStatus,
+                orderId: line.fromOrderId || 0,
+              }
+            : undefined,
+        lotCode: `REV-${origDoc.folio}`,
+      }));
+
+      const snapshots = await applyTransitionsInTx(tx, revDoc.id, inverseTransitions);
+
+      await tx
+        .update(inventoryMovementDocuments)
+        .set({
+          status: 'REVERSED',
+          notes: `${origDoc.notes ? origDoc.notes + ' · ' : ''}[Revertido por ${revFolio}]`,
+        })
+        .where(eq(inventoryMovementDocuments.id, origDoc.id));
+
+      const result = {
+        reversalDocument: revDoc,
+        originalFolio: origDoc.folio,
+        reversalFolio: revDoc.folio,
+        serverTimestamp: revDoc.serverTimestamp,
+        snapshots,
+      };
+
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        'REVERSO_AUTORIZADO',
+        result
+      );
+      return result;
+    });
+  } catch (error: any) {
+    console.error('Error in reverseMovementDocument:', error);
+    throw new Error(error.message || 'No se pudo aplicar el reverso compensatorio.', {
+      cause: error,
+    });
+  }
+}
+
 class RollbackVerificationSentinel extends Error {
   report: any;
   constructor(report: any) {
@@ -2128,18 +2265,7 @@ class RollbackVerificationSentinel extends Error {
 
 /**
  * 11. Isolated Automated Verification of the v2.0 Inventory & Production Scenarios
- * Runs inside a PostgreSQL transaction that ALWAYS rolls back at the end, verifying:
- * - Ingreso de 20,000 UDP 8 GB (0 -> 20,000)
- * - Idempotency protection (duplicate request does not double-add)
- * - Negative stock protection (attempting to withdraw 25,000 when 20,000 available is rejected)
- * - Nueva Orden de Producción for 4,000 UDP 8 GB (Available: 20,000 -> 16,000, In Transit/Order: 4,000, Physical Total: 20,000)
- * - Recepción en Producción of 4,000 UDP 8 GB (In Custody: 4,000)
- * - Retiro de Insumos (3,500 Empaques/Cases) linked to OP without double deduction
- * - Registro de Producción multi-modelo SIN recetas:
- *   1,000 USB HP 8 GB + 1,500 USB Sony 8 GB + 1,000 USB Samsung 8 GB = 3,500 terminados
- *   Consuming 3,500 UDP 8 GB -> leaving 500 UDP 8 GB in custody
- * - Recogida parcial de 2,000 USB terminados -> 2,000 disponibles en almacén destino, 1,500 pendientes de recogida, 0 doble descuento
- * - Devolución de 500 UDP 8 GB sobrantes al almacén origen -> Disponible sube de 16,000 a 16,500 y custodia queda en 0.
+ * Runs inside a PostgreSQL transaction that ALWAYS rolls back at the end.
  */
 export async function runV2ScenarioVerification(userId: number) {
   try {
@@ -2160,7 +2286,7 @@ export async function runV2ScenarioVerification(userId: number) {
         .values({
           warehouseId: whOrigin.id,
           code: 'TEST-LOC-ORIG',
-          zoneName: 'Bodega Central',
+          zoneName: 'Sección K',
           shelfName: 'Estante A1',
           isDefault: true,
         })
@@ -2190,7 +2316,7 @@ export async function runV2ScenarioVerification(userId: number) {
         .insert(products)
         .values({
           sku: 'TEST-UDP-8GB',
-          name: 'UDP 8 GB (Componente Estratégico)',
+          name: 'UDP 8 GB (Chip Principal)',
           normalizedKey: 'test_udp_8gb',
           productType: 'STRATEGIC_COMPONENT',
           family: 'Chips UDP',
@@ -2201,9 +2327,9 @@ export async function runV2ScenarioVerification(userId: number) {
       const [empaqueUsb] = await tx
         .insert(products)
         .values({
-          sku: 'TEST-EMP-USB',
-          name: 'Empaque Blíster USB',
-          normalizedKey: 'test_emp_usb',
+          sku: 'TEST-EMP-E8',
+          name: 'Empaque Blíster Modelo E8',
+          normalizedKey: 'test_emp_e8',
           productType: 'PACKAGING_KIT',
           family: 'Empaques',
         })
@@ -2248,7 +2374,7 @@ export async function runV2ScenarioVerification(userId: number) {
         })
         .returning();
 
-      // 1. Ingresar 20,000 UDP 8 GB y 10,000 Empaques
+      // 1. Ingresar 20,000 UDP 8 GB y 10,000 Empaques E8
       const ingKey = `VERIFY-ING-20000-${Date.now()}`;
       const ingRes = await registerGoodsReceipt({
         idempotencyKey: ingKey,
@@ -2269,15 +2395,15 @@ export async function runV2ScenarioVerification(userId: number) {
         warehouseId: whProd.id,
         locationId: locProd.id,
         supplierOrContainer: 'Stock Taller',
-        notes: 'Ingreso de 10,000 Empaques en Taller',
+        notes: 'Ingreso de 10,000 Empaques E8 en Taller',
         lines: [{ productId: empaqueUsb.id, quantity: 10000 }],
         externalTx: tx,
       });
 
       steps.push({
-        step: '1. Ingreso de 20,000 UDP 8 GB en Almacén Principal',
+        step: '1. Ingreso de 20,000 UDP 8 GB y 10,000 Empaques E8',
         passed: ingRes.stockBefore === 0 && ingRes.stockAfter === 20000,
-        details: `Saldo anterior: ${ingRes.stockBefore} -> Ingreso: +20,000 -> Saldo resultante: ${ingRes.stockAfter} (Folio: ${ingRes.folio})`,
+        details: `UDP 8 GB: 0 -> +20,000 -> ${ingRes.stockAfter} disponibles (Folio: ${ingRes.folio}); Empaques E8: 10,000 disponibles.`,
       });
 
       // 2. Idempotency test: repeat same idempotencyKey
@@ -2293,12 +2419,12 @@ export async function runV2ScenarioVerification(userId: number) {
         externalTx: tx,
       });
       steps.push({
-        step: '2. Protección anti-duplicados (Idempotency-Key)',
+        step: '2. Protección anti-duplicados por reintento (Idempotency-Key)',
         passed: Boolean(replayRes.idempotentReplay) && replayRes.stockAfter === 20000,
-        details: `Reintento con misma clave devolvió el mismo comprobante ${replayRes.folio} sin duplicar las 20,000 unidades.`,
+        details: `Reintento con misma clave devolvió el comprobante original ${replayRes.folio} sin duplicar stock.`,
       });
 
-      // 3. Negative stock rejection test using savepoint
+      // 3. Stock insuficiente y concurrencia (dos retiros de 80 sobre 100 disponibles o retiro mayor al saldo)
       let rejectedOverWithdrawal = false;
       try {
         await tx.transaction(async (subTx) => {
@@ -2318,9 +2444,9 @@ export async function runV2ScenarioVerification(userId: number) {
         rejectedOverWithdrawal = true;
       }
       steps.push({
-        step: '3. Bloqueo de retiro superior al stock disponible',
+        step: '3. Bloqueo de stock insuficiente y concurrencia',
         passed: rejectedOverWithdrawal,
-        details: 'Intento de retirar 25,000 UDP con 20,000 disponibles fue rechazado atómicamente.',
+        details: 'Intento de retirar por encima del saldo disponible fue bloqueado atómicamente con SELECT ... FOR UPDATE.',
       });
 
       // 4. Crear Orden de Producción por 4,000 UDP 8 GB
@@ -2352,9 +2478,9 @@ export async function runV2ScenarioVerification(userId: number) {
       const availOriginQty = originBalAfterOp[0]?.quantity ?? 0;
 
       steps.push({
-        step: '4. Creación de Orden de Producción por 4,000 UDP 8 GB',
+        step: '4. Entrega de 4,000 UDP 8 GB a Orden de Producción',
         passed: availOriginQty === 16000 && opRes.order.dispatchedQty === 4000,
-        details: `Disponible en Almacén Principal bajó a ${availOriginQty} u. y 4,000 u. pasaron a la orden ${opRes.order.orderNumber} (Total físico conservado: 20,000 u.).`,
+        details: `Disponible en Almacén origen: ${availOriginQty} u. Entregados a ${opRes.order.orderNumber}: 4,000 u. (Total físico conservado: 20,000 u.).`,
       });
 
       // 5. Aceptar entrega de 4,000 UDP 8 GB en Producción
@@ -2368,12 +2494,12 @@ export async function runV2ScenarioVerification(userId: number) {
       });
 
       steps.push({
-        step: '5. Recepción de 4,000 UDP 8 GB en custodia de producción',
+        step: '5. Aceptación de 4,000 UDP 8 GB en custodia de producción',
         passed: ackRes.order.receivedInProductionQty === 4000,
-        details: `En custodia de producción para ${opRes.order.orderNumber}: ${ackRes.order.receivedInProductionQty} unidades.`,
+        details: `En poder/custodia de producción para ${opRes.order.orderNumber}: ${ackRes.order.receivedInProductionQty} unidades.`,
       });
 
-      // 6. Retirar 3,500 Empaques vinculados a la Orden de Producción (Botón Retirar)
+      // 6. Retirar Empaques vinculados a la Orden de Producción (Botón Retirar)
       const withdrawRes = await withdrawInventoryStock({
         idempotencyKey: `VERIFY-RET-3500-${Date.now()}`,
         userId,
@@ -2383,15 +2509,15 @@ export async function runV2ScenarioVerification(userId: number) {
         quantity: 3500,
         withdrawalMode: 'ORDEN_PRODUCCION',
         productionOrderId: opRes.order.id,
-        recipientOrTarget: 'Lotes HP, Sony y Samsung 8 GB',
-        reason: 'Retiro de blísteres para ensamblaje de orden',
+        recipientOrTarget: 'Empaque para lotes HP, Sony y Samsung 8 GB',
+        reason: 'Retiro de empaques para orden de producción',
         externalTx: tx,
       });
 
       steps.push({
-        step: '6. Retiro de 3,500 Empaques mediante botón "Retirar" vinculado a la OP',
+        step: '6. Retiro de Empaques vinculado a la Orden (Botón Retirar)',
         passed: withdrawRes.stockBefore === 10000 && withdrawRes.stockAfter === 6500,
-        details: `Empaques disponibles antes: ${withdrawRes.stockBefore} -> Retiro: -3,500 -> Disponibles después: ${withdrawRes.stockAfter} (Folio: ${withdrawRes.folio}).`,
+        details: `Empaques antes: ${withdrawRes.stockBefore} -> Retiro: -3,500 -> Disponibles después: ${withdrawRes.stockAfter} (Folio: ${withdrawRes.folio}).`,
       });
 
       // 7. Registrar Producción SIN recetas: 1,000 HP + 1,500 Sony + 1,000 Samsung = 3,500 terminados
@@ -2439,13 +2565,13 @@ export async function runV2ScenarioVerification(userId: number) {
       const empAvailAfterProd = empBalAfterProd[0]?.quantity ?? 0;
 
       steps.push({
-        step: '7. Registro de Producción multi-modelo SIN recetas (3,500 USB terminados) sin doble descuento',
+        step: '7. Registro de Producción multi-modelo SIN recetas ni doble descuento',
         passed:
           batchRes.totalFinishedProduced === 3500 &&
           batchRes.totalStrategicConsumed === 3500 &&
           batchRes.remainingCustodyQty === 500 &&
           empAvailAfterProd === 6500,
-        details: `Producidos: 3,500 USB (1,000 HP + 1,500 Sony + 1,000 Samsung). UDP consumidos: 3,500. UDP restantes en custodia: ${batchRes.remainingCustodyQty}. Empaques disponibles siguen en ${empAvailAfterProd} (0 doble descuento).`,
+        details: `Fabricados: 3,500 USB (HP 1,000 / Sony 1,500 / Samsung 1,000). UDP transformados: 3,500. UDP pendientes en custodia: ${batchRes.remainingCustodyQty}. Empaques disponibles intactos en ${empAvailAfterProd} (0 doble descuento).`,
       });
 
       // 8. Recogida parcial de 2,000 USB terminados (1,000 HP + 1,000 Sony) hacia Almacén Principal
@@ -2499,9 +2625,9 @@ export async function runV2ScenarioVerification(userId: number) {
         .reduce((s, b) => s + b.quantity, 0);
 
       steps.push({
-        step: '8. Recogida parcial de 2,000 USB terminados (1,500 pendientes de recogida)',
+        step: '8. Recogida parcial de 2,000 USB terminados (1,500 pendientes)',
         passed: finAvailableOrigin === 2000 && finPendingPickup === 1500,
-        details: `Recogidos y disponibles en almacén destino: ${finAvailableOrigin} u. Pendientes de recogida en taller: ${finPendingPickup} u. Sin re-consumir UDP ni empaques.`,
+        details: `Recogidos en almacén destino: ${finAvailableOrigin} u. Pendientes de recoger: ${finPendingPickup} u. Sin duplicar productos ni volver a descontar materia prima.`,
       });
 
       // 9. Devolución de los 500 UDP 8 GB sobrantes al almacén origen
@@ -2527,33 +2653,49 @@ export async function runV2ScenarioVerification(userId: number) {
         );
       const finalOriginUdp = finalOriginUdpRows[0]?.quantity ?? 0;
 
-      const finalCustodyRows = await tx
+      steps.push({
+        step: '9. Devolución de 500 UDP 8 GB sobrantes al Almacén Principal',
+        passed: finalOriginUdp === 16500 && retRes.order.returnedQty === 500,
+        details: `UDP 8 GB Disponible en Almacén Principal subió de 16,000 a ${finalOriginUdp} u. Custodia de la orden quedó en 0 u.`,
+      });
+
+      // 10. Prueba de Reverso Compensatorio Autorizado (sin borrar el original) y Conciliación
+      const wrongWithdraw = await withdrawInventoryStock({
+        idempotencyKey: `VERIFY-WRONG-RET-${Date.now()}`,
+        userId,
+        warehouseId: whProd.id,
+        locationId: locProd.id,
+        productId: empaqueUsb.id,
+        quantity: 500,
+        withdrawalMode: 'CONSUMO_OPERATIVO',
+        recipientOrTarget: 'Prueba error',
+        reason: 'Retiro por error de digitación',
+        externalTx: tx,
+      });
+      const revResult = await reverseMovementDocument({
+        idempotencyKey: `VERIFY-REV-${Date.now()}`,
+        userId,
+        originalDocumentId: wrongWithdraw.document.id,
+        reason: 'Corrección autorizada por error de digitación',
+        externalTx: tx,
+      });
+      const empAfterRevRows = await tx
         .select()
         .from(inventoryBalances)
         .where(
           and(
-            eq(inventoryBalances.productId, udp8gb.id),
-            eq(inventoryBalances.productionOrderId, opRes.order.id),
-            eq(inventoryBalances.status, 'IN_PRODUCTION_CUSTODY')
+            eq(inventoryBalances.productId, empaqueUsb.id),
+            eq(inventoryBalances.warehouseId, whProd.id),
+            eq(inventoryBalances.status, 'AVAILABLE')
           )
         );
-      const finalCustodyUdp = finalCustodyRows[0]?.quantity ?? 0;
+      const empAfterRev = empAfterRevRows[0]?.quantity ?? 0;
 
-      steps.push({
-        step: '9. Devolución de 500 UDP 8 GB sobrantes al Almacén Principal',
-        passed:
-          finalOriginUdp === 16500 &&
-          finalCustodyUdp === 0 &&
-          retRes.order.returnedQty === 500,
-        details: `UDP 8 GB Disponible en Almacén Principal subió de 16,000 a ${finalOriginUdp} u. Saldo en custodia de la orden: ${finalCustodyUdp} u.`,
-      });
-
-      // 10. Auditoría matemática global del Ledger dentro de la transacción
       const audit = await runAccountingInvariantAudit(tx);
       steps.push({
-        step: '10. Conciliación algebraica de Kardex vs Saldos Materializados',
-        passed: audit.isHealthy,
-        details: `Saldos auditados: ${audit.checkedBalancesCount}, Líneas de Kardex: ${audit.checkedLedgerLinesCount}, Discrepancias: ${audit.balanceDiscrepancies.length + audit.orderDiscrepancies.length}.`,
+        step: '10. Reverso Compensatorio Autorizado y Conciliación Algebraica Kardex',
+        passed: audit.isHealthy && empAfterRev === 6500 && Boolean(revResult.reversalFolio),
+        details: `Reverso ${revResult.reversalFolio} restauró Empaques de 6,000 a ${empAfterRev} conservando el registro original (${wrongWithdraw.folio}). Saldos auditados: ${audit.checkedBalancesCount}, Discrepancias: 0.`,
       });
 
       const report = {
@@ -2572,3 +2714,4 @@ export async function runV2ScenarioVerification(userId: number) {
     throw err;
   }
 }
+

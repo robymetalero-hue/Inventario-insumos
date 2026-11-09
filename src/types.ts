@@ -404,6 +404,7 @@ export function translateMovementType(type: string): string {
     TRANSFERENCIA_RECEPCION: 'Recepción de Transferencia',
     CAMBIO_UBICACION: 'Cambio de Ubicación Interna',
     AJUSTE_CONTEO: 'Ajuste por Conteo Físico',
+    REVERSO_AUTORIZADO: 'Corrección / Reverso Autorizado',
   };
   return map[type] || type;
 }

@@ -2,10 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Package,
   Factory,
-  Truck,
-  ArrowLeftRight,
   History,
-  Lock,
   LogOut,
   Wifi,
   WifiOff,
@@ -21,6 +18,8 @@ import {
   Sparkles,
   ChevronRight,
   LayoutDashboard,
+  Settings,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, WorkspaceData, translateRole } from './types.ts';
@@ -29,17 +28,14 @@ import { ProductionAndPickupView } from './components/ProductionAndPickupView.ts
 import { OperationsAuditAndPrivateView } from './components/OperationsAuditAndPrivateView.tsx';
 import { PWAInstallButton } from './components/PWAInstallButton.tsx';
 
-type ActiveModule =
+export type ActiveModule =
   | 'SUMMARY'
   | 'STOCK_CATALOG'
   | 'PRODUCTION_ORDERS'
-  | 'PICKUPS_DELIVERIES'
   | 'KARDEX_REPORTS'
-  | 'WAREHOUSES_LOCATIONS'
-  | 'CATEGORIES'
-  | 'TRANSFERS_COUNTS'
-  | 'USERS_MANAGEMENT'
-  | 'OWNER_PRIVATE';
+  | 'CONFIGURATION';
+
+type ConfigSubSection = 'WAREHOUSES' | 'CATEGORIES' | 'PRODUCTS' | 'TRANSFERS' | 'USERS';
 
 const STORAGE_TOKEN_KEY = 'controlstock_session_token_v2';
 const STORAGE_USER_KEY = 'controlstock_session_user_v2';
@@ -66,12 +62,26 @@ export default function App() {
   const [activeModule, setActiveModule] = useState<ActiveModule>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_MODULE_KEY) as string;
-      if (saved === 'BOM_RECIPES') return 'PRODUCTION_ORDERS';
-      return (saved as ActiveModule) || 'STOCK_CATALOG';
+      const valid: ActiveModule[] = [
+        'SUMMARY',
+        'STOCK_CATALOG',
+        'PRODUCTION_ORDERS',
+        'KARDEX_REPORTS',
+        'CONFIGURATION',
+      ];
+      if (valid.includes(saved as ActiveModule)) {
+        return saved as ActiveModule;
+      }
+      return 'STOCK_CATALOG';
     } catch {
       return 'STOCK_CATALOG';
     }
   });
+
+  const [configSubSection, setConfigSubSection] = useState<ConfigSubSection>('WAREHOUSES');
+  const [productionInitialSubTab, setProductionInitialSubTab] = useState<'ORDENES' | 'RECOGIDA'>(
+    'ORDENES'
+  );
 
   const [data, setData] = useState<WorkspaceData | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
@@ -108,6 +118,41 @@ export default function App() {
     }
   };
 
+  // Helper to support legacy or sub-module navigation from child views
+  const handleChildNavigate = (
+    target:
+      | 'SUMMARY'
+      | 'STOCK_CATALOG'
+      | 'PRODUCTION_ORDERS'
+      | 'PICKUPS_DELIVERIES'
+      | 'KARDEX_REPORTS'
+      | 'WAREHOUSES_LOCATIONS',
+    options?: { productId?: number; orderId?: number }
+  ) => {
+    if (options?.productId) {
+      setKardexFilterProductId(options.productId);
+    }
+    if (options?.orderId) {
+      setKardexFilterOrderId(options.orderId);
+    }
+    if (target === 'PICKUPS_DELIVERIES') {
+      setProductionInitialSubTab('RECOGIDA');
+      handleSelectModule('PRODUCTION_ORDERS');
+      return;
+    }
+    if (target === 'PRODUCTION_ORDERS') {
+      setProductionInitialSubTab('ORDENES');
+      handleSelectModule('PRODUCTION_ORDERS');
+      return;
+    }
+    if (target === 'WAREHOUSES_LOCATIONS') {
+      setConfigSubSection('WAREHOUSES');
+      handleSelectModule('CONFIGURATION');
+      return;
+    }
+    handleSelectModule(target);
+  };
+
   const clearSession = useCallback(() => {
     setToken('');
     setUser(null);
@@ -140,7 +185,7 @@ export default function App() {
       if (token) {
         headers.set('Authorization', `Bearer ${token}`);
       }
-      const res = await fetch(url, { ...options, headers });
+      const res = await fetch(url, { ...options, headers, cache: 'no-store' });
       const json = await res.json().catch(() => ({}));
       if (res.status === 401) {
         clearSession();
@@ -162,6 +207,7 @@ export default function App() {
       try {
         const res = await fetch('/api/workspace', {
           headers: { Authorization: `Bearer ${tk}` },
+          cache: 'no-store',
         });
         if (res.status === 401) {
           clearSession();
@@ -230,22 +276,17 @@ export default function App() {
         <motion.div
           initial={{ opacity: 0, scale: 0.96, y: 12 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 0.25, ease: 'easeOut' }}
+          transition={{ duration: 0.2, ease: 'easeOut' }}
           className="max-w-md w-full bg-white rounded-3xl border border-slate-200/80 shadow-2xl overflow-hidden"
         >
           <div className="bg-gradient-to-b from-slate-900 to-slate-950 p-8 text-white text-center border-b border-slate-800 relative overflow-hidden">
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              transition={{ delay: 0.08, type: 'spring', stiffness: 260, damping: 20 }}
-              className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 to-sky-500 flex items-center justify-center mx-auto mb-3.5 shadow-xl shadow-blue-600/30 ring-4 ring-white/10"
-            >
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-blue-600 to-sky-500 flex items-center justify-center mx-auto mb-3.5 shadow-xl shadow-blue-600/30 ring-4 ring-white/10">
               <Package className="w-8 h-8 text-white" />
-            </motion.div>
+            </div>
             <h1 className="text-2xl font-bold tracking-tight">ControlStock Pro</h1>
             <p className="text-xs text-slate-400 mt-1.5 flex items-center justify-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
-              Inventario, Almacenes, Producción y Entregas
+              Control de Insumos, Ingresos, Retiros y Producción
             </p>
           </div>
 
@@ -253,19 +294,15 @@ export default function App() {
             {!isOnline && (
               <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold">
                 <WifiOff className="w-4 h-4 shrink-0" />
-                Sin conexión a internet. El sistema requiere conexión activa.
+                Sin conexión: no se pueden registrar movimientos.
               </div>
             )}
 
             {authError && (
-              <motion.div
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold"
-              >
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700 font-semibold">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 {authError}
-              </motion.div>
+              </div>
             )}
 
             <form onSubmit={handleCredentialsLogin} className="space-y-4">
@@ -295,15 +332,14 @@ export default function App() {
                   className="w-full px-4 py-3 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600 transition-shadow"
                 />
               </div>
-              <motion.button
-                whileTap={{ scale: 0.98 }}
+              <button
                 type="submit"
                 disabled={loading || !isOnline}
                 className="w-full py-3.5 bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 disabled:opacity-50 text-white text-sm font-bold rounded-xl transition-all shadow-md shadow-blue-600/20 cursor-pointer flex items-center justify-center gap-2"
               >
                 <span>{loading ? 'Ingresando al sistema...' : 'Iniciar Sesión'}</span>
                 {!loading && <ChevronRight className="w-4 h-4" />}
-              </motion.button>
+              </button>
             </form>
 
             <div className="pt-2 border-t border-slate-100">
@@ -315,91 +351,55 @@ export default function App() {
     );
   }
 
+  // ============================================================================
+  // NAVEGACIÓN SIMPLIFICADA: MÁXIMO 5 SECCIONES PRINCIPALES
+  // ============================================================================
   const navItems: {
     id: ActiveModule;
     label: string;
+    subtitle: string;
     icon: React.ComponentType<{ className?: string }>;
-    group: string;
     badge?: number;
-    roles?: string[];
   }[] = [
     {
       id: 'SUMMARY',
-      label: 'Resumen General',
+      label: 'Inicio',
+      subtitle: 'Resumen y accesos rápidos',
       icon: LayoutDashboard,
-      group: 'OPERACIÓN PRINCIPAL',
     },
     {
       id: 'STOCK_CATALOG',
-      label: 'Inventario y Productos',
+      label: 'Inventario',
+      subtitle: 'Ingresar, retirar y existencias',
       icon: Package,
-      group: 'OPERACIÓN PRINCIPAL',
       badge: data?.products.length,
     },
     {
       id: 'PRODUCTION_ORDERS',
       label: 'Órdenes de Producción',
+      subtitle: 'Entrega UDP, producción y recogida',
       icon: Factory,
-      group: 'OPERACIÓN PRINCIPAL',
       badge: data?.productionOrders.length,
-    },
-    {
-      id: 'PICKUPS_DELIVERIES',
-      label: 'Productos Terminados / Recogidas',
-      icon: Truck,
-      group: 'OPERACIÓN PRINCIPAL',
     },
     {
       id: 'KARDEX_REPORTS',
       label: 'Historial y Kardex',
+      subtitle: 'Movimientos y saldos auditables',
       icon: History,
-      group: 'TRAZABILIDAD Y ALMACENES',
     },
     {
-      id: 'WAREHOUSES_LOCATIONS',
-      label: 'Almacenes y Ubicaciones',
-      icon: Building2,
-      group: 'TRAZABILIDAD Y ALMACENES',
-      badge: data?.warehouses.length,
-    },
-    {
-      id: 'CATEGORIES',
-      label: 'Clasificaciones (Dptos.)',
-      icon: Tags,
-      group: 'TRAZABILIDAD Y ALMACENES',
-      badge: data?.categories.length,
-    },
-    {
-      id: 'TRANSFERS_COUNTS',
-      label: 'Traslados y Conteos',
-      icon: ArrowLeftRight,
-      group: 'TRAZABILIDAD Y ALMACENES',
-    },
-    {
-      id: 'USERS_MANAGEMENT',
-      label: 'Usuarios y Permisos',
-      icon: Users,
-      group: 'ADMINISTRACIÓN',
-      roles: ['OWNER', 'ADMIN'],
-    },
-    {
-      id: 'OWNER_PRIVATE',
-      label: 'Costos Privados (Owner)',
-      icon: Lock,
-      group: 'ADMINISTRACIÓN',
-      roles: ['OWNER'],
+      id: 'CONFIGURATION',
+      label: 'Configuración',
+      subtitle: 'Almacenes, subalmacenes y dptos.',
+      icon: Settings,
     },
   ];
 
-  const visibleNavItems = navItems.filter(
-    (item) => !item.roles || item.roles.includes(user.role)
-  );
-
-  const groups = Array.from(new Set(visibleNavItems.map((i) => i.group)));
+  const isAdmin = user.role === 'OWNER' || user.role === 'ADMIN';
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col lg:flex-row">
-      {/* Off-line blocker */}
+      {/* Off-line blocker (Strictly Online Required) */}
       <AnimatePresence>
         {!isOnline && (
           <motion.div
@@ -408,19 +408,17 @@ export default function App() {
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4"
           >
-            <motion.div
-              initial={{ scale: 0.92 }}
-              animate={{ scale: 1 }}
-              className="bg-white rounded-2xl max-w-md w-full p-6 text-center shadow-2xl border border-red-200"
-            >
+            <div className="bg-white rounded-2xl max-w-md w-full p-6 text-center shadow-2xl border border-red-200">
               <div className="w-12 h-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto mb-3">
                 <WifiOff className="w-6 h-6" />
               </div>
-              <h2 className="text-lg font-bold text-slate-900">Conexión Perdida</h2>
+              <h2 className="text-lg font-bold text-slate-900">
+                Sin conexión: no se pueden registrar movimientos
+              </h2>
               <p className="text-xs text-slate-600 mt-1">
-                Para evitar errores de inventario, las operaciones están pausadas hasta recuperar internet.
+                La base de datos del servidor es la única fuente de verdad. Reconecte a internet para continuar operando.
               </p>
-            </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -429,9 +427,9 @@ export default function App() {
       <AnimatePresence>
         {toast && (
           <motion.div
-            initial={{ opacity: 0, y: 16, scale: 0.95 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.95 }}
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
             className="fixed bottom-5 right-5 z-50 max-w-md"
           >
             <div
@@ -461,7 +459,7 @@ export default function App() {
           <div>
             <span className="font-bold text-sm block leading-none">ControlStock Pro</span>
             <span className="text-[10px] text-emerald-400 font-medium flex items-center gap-1 mt-0.5">
-              <Wifi className="w-2.5 h-2.5" /> Conectado en línea
+              <Wifi className="w-2.5 h-2.5" /> En línea
             </span>
           </div>
         </div>
@@ -482,7 +480,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Left Sidebar Navigation */}
+      {/* Left Sidebar Navigation (5 Simple Sections) */}
       <aside
         className={`${
           mobileMenuOpen ? 'block' : 'hidden'
@@ -500,60 +498,58 @@ export default function App() {
             </h1>
             <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-400 font-medium mt-0.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              Sincronizado en línea
+              Conectado en línea
             </span>
           </div>
         </div>
 
-        {/* Navigation Links */}
-        <div className="flex-1 overflow-y-auto py-4 px-3 space-y-5">
-          {groups.map((grp) => (
-            <div key={grp}>
-              <div className="px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                {grp}
-              </div>
-              <div className="space-y-1">
-                {visibleNavItems
-                  .filter((i) => i.group === grp)
-                  .map((item) => {
-                    const Icon = item.icon;
-                    const active = activeModule === item.id;
-                    return (
-                      <motion.button
-                        whileTap={{ scale: 0.98 }}
-                        key={item.id}
-                        onClick={() => handleSelectModule(item.id)}
-                        className={`w-full flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                          active
-                            ? 'bg-gradient-to-r from-blue-600 to-sky-600 text-white shadow-md shadow-blue-600/20'
-                            : 'text-slate-300 hover:bg-slate-900 hover:text-white'
-                        }`}
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <Icon
-                            className={`w-4 h-4 shrink-0 ${
-                              active ? 'text-white' : 'text-slate-400'
-                            }`}
-                          />
-                          <span className="truncate">{item.label}</span>
-                        </div>
-                        {item.badge !== undefined && (
-                          <span
-                            className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold ${
-                              active
-                                ? 'bg-white/20 text-white'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {item.badge}
-                          </span>
-                        )}
-                      </motion.button>
-                    );
-                  })}
-              </div>
-            </div>
-          ))}
+        {/* 5 Main Navigation Buttons */}
+        <div className="flex-1 overflow-y-auto py-4 px-3 space-y-1.5">
+          <div className="px-3 mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            MENÚ PRINCIPAL
+          </div>
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const active = activeModule === item.id;
+            return (
+              <button
+                key={item.id}
+                onClick={() => handleSelectModule(item.id)}
+                className={`w-full flex items-center justify-between gap-2 px-3.5 py-3 rounded-xl text-left transition-all cursor-pointer ${
+                  active
+                    ? 'bg-gradient-to-r from-blue-600 to-sky-600 text-white shadow-md shadow-blue-600/20'
+                    : 'text-slate-300 hover:bg-slate-900 hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon
+                    className={`w-5 h-5 shrink-0 ${
+                      active ? 'text-white' : 'text-slate-400'
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold truncate">{item.label}</div>
+                    <div
+                      className={`text-[10px] truncate ${
+                        active ? 'text-blue-100' : 'text-slate-500'
+                      }`}
+                    >
+                      {item.subtitle}
+                    </div>
+                  </div>
+                </div>
+                {item.badge !== undefined && (
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold shrink-0 ${
+                      active ? 'bg-white/20 text-white' : 'bg-slate-800 text-slate-400'
+                    }`}
+                  >
+                    {item.badge}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* User Footer */}
@@ -592,95 +588,166 @@ export default function App() {
             <span>Sincronizando inventario en tiempo real...</span>
           </div>
         ) : (
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={activeModule}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18, ease: 'easeOut' }}
-            >
-              {(activeModule === 'SUMMARY' ||
-                activeModule === 'STOCK_CATALOG' ||
-                activeModule === 'CATEGORIES' ||
-                activeModule === 'WAREHOUSES_LOCATIONS') && (
-                <CatalogAndStockView
-                  data={data}
-                  isOnline={isOnline}
-                  initialSubView={
-                    activeModule === 'SUMMARY'
-                      ? 'SUMMARY'
-                      : activeModule === 'STOCK_CATALOG'
-                      ? 'PRODUCTS'
-                      : activeModule === 'CATEGORIES'
-                      ? 'CATEGORIES'
-                      : 'WAREHOUSES'
-                  }
-                  preselectedWithdrawOrderId={preselectedWithdrawOrderId}
-                  onClearPreselectedOrder={() => setPreselectedWithdrawOrderId(null)}
-                  onNavigateToModule={(mod, options) => {
-                    if (options?.productId) {
-                      setKardexFilterProductId(options.productId);
-                    }
-                    if (options?.orderId) {
-                      setKardexFilterOrderId(options.orderId);
-                    }
-                    handleSelectModule(mod);
-                  }}
-                  apiFetch={apiFetch}
-                  onRefresh={() => fetchWorkspace()}
-                />
-              )}
+          <div className="space-y-6">
+            {/* 1. INICIO (SUMMARY) & 2. INVENTARIO (STOCK_CATALOG) */}
+            {(activeModule === 'SUMMARY' || activeModule === 'STOCK_CATALOG') && (
+              <CatalogAndStockView
+                data={data}
+                isOnline={isOnline}
+                initialSubView={activeModule === 'SUMMARY' ? 'SUMMARY' : 'PRODUCTS'}
+                preselectedWithdrawOrderId={preselectedWithdrawOrderId}
+                onClearPreselectedOrder={() => setPreselectedWithdrawOrderId(null)}
+                onNavigateToModule={handleChildNavigate}
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
 
-              {(activeModule === 'PRODUCTION_ORDERS' ||
-                activeModule === 'PICKUPS_DELIVERIES') && (
-                <ProductionAndPickupView
-                  data={data}
-                  isOnline={isOnline}
-                  initialSubView={
-                    activeModule === 'PRODUCTION_ORDERS' ? 'ORDENES' : 'RECOGIDA'
-                  }
-                  onRequestWithdrawForOrder={(orderId: number) => {
-                    setPreselectedWithdrawOrderId(orderId);
-                    handleSelectModule('STOCK_CATALOG');
-                  }}
-                  onNavigateToKardexForOrder={(orderId: number) => {
-                    setKardexFilterOrderId(orderId);
-                    handleSelectModule('KARDEX_REPORTS');
-                  }}
-                  apiFetch={apiFetch}
-                  onRefresh={() => fetchWorkspace()}
-                />
-              )}
+            {/* 3. ÓRDENES DE PRODUCCIÓN (ORDENES + RECEPCIÓN DE TERMINADOS) */}
+            {activeModule === 'PRODUCTION_ORDERS' && (
+              <ProductionAndPickupView
+                data={data}
+                isOnline={isOnline}
+                initialSubView={productionInitialSubTab}
+                onRequestWithdrawForOrder={(orderId: number) => {
+                  setPreselectedWithdrawOrderId(orderId);
+                  handleSelectModule('STOCK_CATALOG');
+                }}
+                onNavigateToKardexForOrder={(orderId: number) => {
+                  setKardexFilterOrderId(orderId);
+                  handleSelectModule('KARDEX_REPORTS');
+                }}
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
 
-              {(activeModule === 'TRANSFERS_COUNTS' ||
-                activeModule === 'KARDEX_REPORTS' ||
-                activeModule === 'USERS_MANAGEMENT' ||
-                activeModule === 'OWNER_PRIVATE') && (
-                <OperationsAuditAndPrivateView
-                  data={data}
-                  isOnline={isOnline}
-                  initialSubView={
-                    activeModule === 'TRANSFERS_COUNTS'
-                      ? 'TRANSFERS'
-                      : activeModule === 'KARDEX_REPORTS'
-                      ? 'KARDEX'
-                      : activeModule === 'USERS_MANAGEMENT'
-                      ? 'USERS'
-                      : 'PRIVATE_OWNER'
-                  }
-                  initialKardexProductId={kardexFilterProductId}
-                  initialKardexOrderId={kardexFilterOrderId}
-                  onClearKardexContext={() => {
-                    setKardexFilterProductId(null);
-                    setKardexFilterOrderId(null);
-                  }}
-                  apiFetch={apiFetch}
-                  onRefresh={() => fetchWorkspace()}
-                />
-              )}
-            </motion.div>
-          </AnimatePresence>
+            {/* 4. HISTORIAL Y KARDEX */}
+            {activeModule === 'KARDEX_REPORTS' && (
+              <OperationsAuditAndPrivateView
+                data={data}
+                isOnline={isOnline}
+                initialSubView="KARDEX"
+                initialKardexProductId={kardexFilterProductId}
+                initialKardexOrderId={kardexFilterOrderId}
+                onClearKardexContext={() => {
+                  setKardexFilterProductId(null);
+                  setKardexFilterOrderId(null);
+                }}
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
+            )}
+
+            {/* 5. CONFIGURACIÓN UNIFICADA (ALMACENES, SUBALMACENES, DEPARTAMENTOS, PRODUCTOS, USUARIOS) */}
+            {activeModule === 'CONFIGURATION' && (
+              <div className="space-y-5">
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                      <Settings className="w-5 h-5 text-blue-600" />
+                      Configuración de Almacenes, Subalmacenes, Departamentos y Productos
+                    </h2>
+                    <p className="text-xs text-slate-500">
+                      Crea y administra almacenes, subalmacenes (secciones/estantes), departamentos, productos y usuarios en un solo lugar.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setConfigSubSection('WAREHOUSES')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        configSubSection === 'WAREHOUSES'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      <Building2 className="w-3.5 h-3.5" />
+                      Almacenes y Subalmacenes ({data.warehouses.length})
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfigSubSection('CATEGORIES')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        configSubSection === 'CATEGORIES'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      <Tags className="w-3.5 h-3.5" />
+                      Departamentos ({data.categories.length})
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfigSubSection('PRODUCTS')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        configSubSection === 'PRODUCTS'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      <Package className="w-3.5 h-3.5" />
+                      Productos ({data.products.length})
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setConfigSubSection('TRANSFERS')}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                        configSubSection === 'TRANSFERS'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                    >
+                      <ArrowLeftRight className="w-3.5 h-3.5" />
+                      Traslados y Conteos
+                    </button>
+
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => setConfigSubSection('USERS')}
+                        className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                          configSubSection === 'USERS'
+                            ? 'bg-slate-900 text-white'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        Usuarios y Permisos ({data.usersPublic.length})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {(configSubSection === 'WAREHOUSES' ||
+                  configSubSection === 'CATEGORIES' ||
+                  configSubSection === 'PRODUCTS') && (
+                  <CatalogAndStockView
+                    data={data}
+                    isOnline={isOnline}
+                    initialSubView={configSubSection}
+                    onNavigateToModule={handleChildNavigate}
+                    apiFetch={apiFetch}
+                    onRefresh={() => fetchWorkspace()}
+                  />
+                )}
+
+                {(configSubSection === 'TRANSFERS' || configSubSection === 'USERS') && (
+                  <OperationsAuditAndPrivateView
+                    data={data}
+                    isOnline={isOnline}
+                    initialSubView={configSubSection === 'TRANSFERS' ? 'TRANSFERS' : 'USERS'}
+                    apiFetch={apiFetch}
+                    onRefresh={() => fetchWorkspace()}
+                  />
+                )}
+              </div>
+            )}
+          </div>
         )}
       </main>
     </div>

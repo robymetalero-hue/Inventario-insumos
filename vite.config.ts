@@ -11,12 +11,19 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png', 'pwa-maskable-512x512.png'],
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+        ],
         manifest: {
           id: '/',
           name: 'ControlStock Pro - Inventario y Producción',
           short_name: 'ControlStock',
-          description: 'Sistema web de inventario, almacenes, recetas de ensamblaje y órdenes de producción.',
+          description:
+            'Sistema web de inventario, almacenes, órdenes de producción y trazabilidad Kardex.',
           theme_color: '#0f172a',
           background_color: '#0f172a',
           display: 'standalone',
@@ -48,8 +55,7 @@ export default defineConfig(() => {
           navigateFallbackDenylist: [/^\/api\//],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],
@@ -59,8 +65,8 @@ export default defineConfig(() => {
       },
     },
     server: {
-      hmr: process.env.DISABLE_HMR !== 'true',
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      hmr: false,
+      watch: null,
     },
   };
 });

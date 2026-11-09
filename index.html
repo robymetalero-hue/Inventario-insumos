@@ -1,12 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ControlStock Pro - Inventario y Producción</title>
-    <meta name="description" content="Sistema web transaccional de inventario de insumos tecnológicos, almacenes, recetas de ensamblaje y órdenes de producción." />
+    <meta name="description" content="Sistema web transaccional de inventario de insumos tecnológicos, almacenes, órdenes de producción y Kardex auditable." />
     <meta property="og:title" content="ControlStock Pro - Inventario y Producción" />
-    <meta property="og:description" content="Sistema web transaccional de inventario de insumos tecnológicos, almacenes, recetas de ensamblaje y órdenes de producción." />
+    <meta property="og:description" content="Sistema web transaccional de inventario de insumos tecnológicos, almacenes, órdenes de producción y Kardex auditable." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#0f172a" />
@@ -19,10 +19,45 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+      (function () {
+        // Prevent benign Vite HMR WebSocket errors in Cloud Run proxy environment
+        var OrigWebSocket = window.WebSocket;
+        if (OrigWebSocket) {
+          var PatchedWebSocket = function (url, protocols) {
+            var protoStr = Array.isArray(protocols) ? protocols.join(',') : String(protocols || '');
+            if (protoStr.indexOf('vite-hmr') !== -1 || protoStr.indexOf('vite-ping') !== -1) {
+              var dummy = Object.create(EventTarget.prototype);
+              dummy.readyState = 3;
+              dummy.send = function () {};
+              dummy.close = function () {};
+              dummy.addEventListener = function () {};
+              dummy.removeEventListener = function () {};
+              return dummy;
+            }
+            return protocols !== undefined
+              ? new OrigWebSocket(url, protocols)
+              : new OrigWebSocket(url);
+          };
+          PatchedWebSocket.prototype = OrigWebSocket.prototype;
+          PatchedWebSocket.CONNECTING = OrigWebSocket.CONNECTING;
+          PatchedWebSocket.OPEN = OrigWebSocket.OPEN;
+          PatchedWebSocket.CLOSING = OrigWebSocket.CLOSING;
+          PatchedWebSocket.CLOSED = OrigWebSocket.CLOSED;
+          window.WebSocket = PatchedWebSocket;
+        }
+
+        window.addEventListener('unhandledrejection', function (event) {
+          var msg = event && event.reason && (event.reason.message || String(event.reason));
+          if (msg && (msg.indexOf('WebSocket closed without opened') !== -1 || msg.indexOf('@vite/client') !== -1)) {
+            event.preventDefault();
+          }
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

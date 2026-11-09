@@ -51,6 +51,7 @@ import {
   receiveWarehouseTransfer,
   submitPhysicalCount,
   approvePhysicalCountAdjustment,
+  reverseMovementDocument,
   runAccountingInvariantAudit,
   runV2ScenarioVerification,
 } from './src/db/inventory-engine.ts';
@@ -68,6 +69,14 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: '12mb' }));
+
+  // Strictly online-only & no browser caching on inventory APIs
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    next();
+  });
 
   // =========================================================================
   // 1. HEALTH & IDEMPOTENCY STATUS CHECK
@@ -1183,6 +1192,27 @@ async function startServer() {
         notes: notes || '',
       });
 
+      return res.json(result);
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/inventory/reverse-movement', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({
+          error: 'Solo el Propietario o Administrador puede autorizar un reverso compensatorio.',
+        });
+      }
+      const { idempotencyKey, originalDocumentId, reason } = req.body;
+      const result = await reverseMovementDocument({
+        idempotencyKey: idempotencyKey || `rev_${Date.now()}`,
+        userId: user.id,
+        originalDocumentId: Number(originalDocumentId),
+        reason: String(reason || ''),
+      });
       return res.json(result);
     } catch (error: any) {
       return res.status(400).json({ error: error.message });

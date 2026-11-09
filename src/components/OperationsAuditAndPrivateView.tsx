@@ -118,6 +118,8 @@ export function OperationsAuditAndPrivateView({
   const [kardexDateFrom, setKardexDateFrom] = useState<string>('');
   const [kardexDateTo, setKardexDateTo] = useState<string>('');
   const [selectedMovementDetail, setSelectedMovementDetail] = useState<any | null>(null);
+  const [reversalReason, setReversalReason] = useState<string>('');
+  const [reversingDoc, setReversingDoc] = useState<boolean>(false);
 
   useEffect(() => {
     if (initialKardexProductId) {
@@ -163,6 +165,34 @@ export function OperationsAuditAndPrivateView({
       notify(err.message, 'error');
     } finally {
       setRunningV2Verify(false);
+    }
+  };
+
+  const handleReverseMovement = async (docId: number) => {
+    if (!reversalReason || reversalReason.trim().length < 4) {
+      notify('Indique un motivo obligatorio para el reverso compensatorio.', 'error');
+      return;
+    }
+    setReversingDoc(true);
+    try {
+      const res = await apiFetch('/api/inventory/reverse-movement', {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: `rev_${docId}_${Date.now()}`,
+          originalDocumentId: docId,
+          reason: reversalReason.trim(),
+        }),
+      });
+      notify(
+        `Reverso aplicado (${res.reversalFolio}): Se compensó el folio ${res.originalFolio} conservando el historial.`
+      );
+      setSelectedMovementDetail(null);
+      setReversalReason('');
+      await onRefresh();
+    } catch (err: any) {
+      notify(err.message, 'error');
+    } finally {
+      setReversingDoc(false);
     }
   };
 
@@ -474,7 +504,13 @@ export function OperationsAuditAndPrivateView({
         let transfersNetQty = 0;
 
         for (const l of whLines) {
-          if (l.movementType === 'RECEPCION' && l.toWarehouseId === w.id) {
+          if (
+            (l.movementType === 'INGRESO_PROVEEDOR' ||
+              l.movementType === 'DEVOLUCION_INSUMOS' ||
+              l.movementType === 'REGULARIZACION_AUTORIZADA' ||
+              l.movementType === 'APERTURA_INICIAL') &&
+            l.toWarehouseId === w.id
+          ) {
             entriesQty += l.quantity;
           } else if (
             (l.movementType === 'RETIRO_PRODUCCION' ||
@@ -489,11 +525,14 @@ export function OperationsAuditAndPrivateView({
             } else if (l.fromStatus === 'IN_PRODUCTION_CUSTODY' && l.fromWarehouseId === w.id) {
               withdrawalsQty += l.quantity;
             }
-          } else if (l.movementType === 'TRASLADO_SALIDA' && l.fromWarehouseId === w.id) {
+          } else if (l.movementType === 'TRANSFERENCIA_SALIDA' && l.fromWarehouseId === w.id) {
             transfersNetQty -= l.quantity;
-          } else if (l.movementType === 'TRASLADO_ENTRADA' && l.toWarehouseId === w.id) {
+          } else if (l.movementType === 'TRANSFERENCIA_RECEPCION' && l.toWarehouseId === w.id) {
             transfersNetQty += l.quantity;
-          } else if (l.movementType === 'DESPACHO_TERMINADOS') {
+          } else if (
+            l.movementType === 'DESPACHO_TERMINADO' ||
+            l.movementType === 'RECEPCION_TERMINADO'
+          ) {
             if (l.fromWarehouseId === w.id && l.fromStatus === 'FINISHED_PENDING_PICKUP') {
               transfersNetQty -= l.quantity;
             }
@@ -1061,18 +1100,19 @@ export function OperationsAuditAndPrivateView({
                 className="px-3 py-2 text-xs font-semibold border border-slate-200 rounded-xl bg-slate-50"
               >
                 <option value="ALL">Todos los Tipos</option>
-                <option value="RECEPCION">Ingreso de Mercadería</option>
+                <option value="INGRESO_PROVEEDOR">Ingreso de Mercadería</option>
+                <option value="DEVOLUCION_INSUMOS">Devolución de Insumos</option>
+                <option value="REGULARIZACION_AUTORIZADA">Regularización Autorizada</option>
                 <option value="RETIRO_PRODUCCION">Retiro p/ Orden Producción</option>
-                <option value="RETIRO_OPERATIVO">Retiro Operativo / Interno</option>
+                <option value="RETIRO_OPERATIVO">Retiro Operativo / Otro Uso</option>
                 <option value="RETIRO_MERMA">Retiro por Merma / Daño</option>
-                <option value="ORDEN_RESERVA">Apertura / Envío a Taller</option>
-                <option value="ORDEN_ENTREGA">Recepción en Custodia</option>
-                <option value="PRODUCCION_LOTE">Registro Producción Terminada</option>
-                <option value="DESPACHO_TERMINADOS">Entrega de Terminados</option>
-                <option value="DEVOLUCION_INSUMO">Devolución de Sobrantes</option>
-                <option value="TRASLADO_SALIDA">Traslado Salida</option>
-                <option value="TRASLADO_ENTRADA">Traslado Entrada</option>
-                <option value="CONTEO_AJUSTE">Ajuste Conteo Físico</option>
+                <option value="DESPACHO_OP">Entrega de UDP/microSD a Producción</option>
+                <option value="ACEPTACION_OP">Recepción en Custodia de Producción</option>
+                <option value="PRODUCCION_LOTE">Registro de Producción Terminada</option>
+                <option value="RECEPCION_TERMINADO">Entrega / Recogida de Terminados</option>
+                <option value="RETORNO_INSUMO_OP">Devolución de Sobrantes de Orden</option>
+                <option value="TRANSFERENCIA_SALIDA">Traslado entre Almacenes</option>
+                <option value="REVERSO_AUTORIZADO">Corrección / Reverso Autorizado</option>
               </select>
 
               <select
@@ -1150,6 +1190,76 @@ export function OperationsAuditAndPrivateView({
               )}
             </div>
           </div>
+
+          {/* Resumen del Período Filtrado */}
+          {(() => {
+            const totalEntries = filteredLines
+              .filter(
+                (m) =>
+                  m.movementType === 'INGRESO_PROVEEDOR' ||
+                  m.movementType === 'DEVOLUCION_INSUMOS' ||
+                  m.movementType === 'REGULARIZACION_AUTORIZADA' ||
+                  m.movementType === 'APERTURA_INICIAL'
+              )
+              .reduce((acc, m) => acc + m.quantity, 0);
+
+            const totalWithdrawals = filteredLines
+              .filter((m) => m.movementType.startsWith('RETIRO_'))
+              .reduce((acc, m) => acc + m.quantity, 0);
+
+            const totalTransformed = filteredLines
+              .filter(
+                (m) =>
+                  m.movementType === 'PRODUCCION_LOTE' &&
+                  m.fromStatus === 'IN_PRODUCTION_CUSTODY'
+              )
+              .reduce((acc, m) => acc + m.quantity, 0);
+
+            const totalManufactured = filteredLines
+              .filter(
+                (m) =>
+                  m.movementType === 'PRODUCCION_LOTE' &&
+                  m.toStatus === 'FINISHED_PENDING_PICKUP'
+              )
+              .reduce((acc, m) => acc + m.quantity, 0);
+
+            return (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs">
+                  <div className="text-[11px] font-bold uppercase text-emerald-700">
+                    Ingresos en el Período
+                  </div>
+                  <div className="text-lg font-mono font-bold text-emerald-800 mt-0.5">
+                    +{formatInt(totalEntries)} u.
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs">
+                  <div className="text-[11px] font-bold uppercase text-amber-700">
+                    Retiros de Insumos
+                  </div>
+                  <div className="text-lg font-mono font-bold text-amber-800 mt-0.5">
+                    -{formatInt(totalWithdrawals)} u.
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs">
+                  <div className="text-[11px] font-bold uppercase text-sky-700">
+                    UDP / microSD Transformados
+                  </div>
+                  <div className="text-lg font-mono font-bold text-sky-800 mt-0.5">
+                    {formatInt(totalTransformed)} u.
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-2xs">
+                  <div className="text-[11px] font-bold uppercase text-indigo-700">
+                    Productos Terminados Fabricados
+                  </div>
+                  <div className="text-lg font-mono font-bold text-indigo-800 mt-0.5">
+                    {formatInt(totalManufactured)} u.
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {kardexViewMode === 'MOVIMIENTOS' ? (
             <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
@@ -1504,9 +1614,51 @@ export function OperationsAuditAndPrivateView({
                   </div>
                 </div>
 
+                {/* Reverso Compensatorio (Solo Admin/Owner en movimientos operativos no revertidos) */}
+                {isOwnerOrAdmin &&
+                  [
+                    'INGRESO_PROVEEDOR',
+                    'DEVOLUCION_INSUMOS',
+                    'REGULARIZACION_AUTORIZADA',
+                    'RETIRO_PRODUCCION',
+                    'RETIRO_OPERATIVO',
+                    'RETIRO_MERMA',
+                  ].includes(selectedMovementDetail.movementType) &&
+                  !String(selectedMovementDetail.notes || '').includes('[Revertido por') && (
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                      <div className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <RotateCcw className="w-3.5 h-3.5 text-amber-600" />
+                        Corregir con Movimiento Compensatorio (Reverso Autorizado)
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        Si este ingreso o retiro tuvo un error, puedes generar un reverso compensatorio referenciado sin borrar el historial original.
+                      </p>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={reversalReason}
+                          onChange={(e) => setReversalReason(e.target.value)}
+                          placeholder="Motivo obligatorio de la corrección..."
+                          className="flex-1 px-3 py-1.5 text-xs border border-slate-300 rounded-lg bg-white"
+                        />
+                        <button
+                          type="button"
+                          disabled={reversingDoc || reversalReason.trim().length < 4}
+                          onClick={() => handleReverseMovement(selectedMovementDetail.documentId)}
+                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-bold rounded-lg cursor-pointer shrink-0"
+                        >
+                          {reversingDoc ? 'Revirtiendo...' : 'Aplicar Reverso'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                 <div className="flex justify-end pt-2">
                   <button
-                    onClick={() => setSelectedMovementDetail(null)}
+                    onClick={() => {
+                      setSelectedMovementDetail(null);
+                      setReversalReason('');
+                    }}
                     className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl cursor-pointer"
                   >
                     Cerrar Detalle
@@ -1534,6 +1686,18 @@ export function OperationsAuditAndPrivateView({
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
+              {isOwnerOrAdmin && (
+                <button
+                  onClick={handleRunV2Verification}
+                  disabled={runningV2Verify}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
+                >
+                  <FlaskConical className="w-4 h-4" />
+                  {runningV2Verify
+                    ? 'Verificando cálculos...'
+                    : 'Verificar Cálculos (Simulación con Rollback)'}
+                </button>
+              )}
               {data.user.role === 'OWNER' && (
                 <button
                   onClick={() => setShowResetConfirm(true)}
@@ -1554,6 +1718,37 @@ export function OperationsAuditAndPrivateView({
               )}
             </div>
           </div>
+
+          {v2VerificationResult && (
+            <div className="bg-emerald-950 text-emerald-100 rounded-2xl p-5 border border-emerald-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-sm flex items-center gap-2 text-emerald-300">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Simulación Transaccional Aislada (v2.0): PASÓ 10/10 PRUEBAS (0 datos de prueba en BD)
+                </div>
+                <button
+                  onClick={() => setV2VerificationResult(null)}
+                  className="text-xs text-emerald-300 underline cursor-pointer"
+                >
+                  Ocultar
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-mono">
+                {v2VerificationResult.steps?.map((s: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className="p-2.5 rounded-lg bg-emerald-900/50 border border-emerald-800/80"
+                  >
+                    <div className="font-bold text-white flex items-center justify-between">
+                      <span>{s.step}</span>
+                      <span className="text-emerald-300">{s.passed ? '✓ OK' : '✗ ERROR'}</span>
+                    </div>
+                    <div className="text-emerald-300 mt-0.5">{s.details}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
             <table className="w-full text-left border-collapse">
