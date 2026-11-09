@@ -1299,22 +1299,167 @@ async function startServer() {
   app.post('/api/production/batches', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
+      const orderId = Number(req.body.productionOrderId);
+      const rawItems = Array.isArray(req.body.items) ? req.body.items : [];
+      if (!orderId || rawItems.length === 0) {
+        return res
+          .status(400)
+          .json({ error: 'Seleccione la orden y al menos una línea de producción.' });
+      }
+
+      const allProds = await db.select().from(products);
+      const allBalances = await db.select().from(inventoryBalances);
+      const allLocs = await db.select().from(warehouseLocations);
+
+      const resolvedItems: {
+        finishedProductId: number;
+        quantityProduced: number;
+        strategicQtyConsumed: number;
+        usedWithdrawalFolios: string[];
+        notes: string;
+      }[] = [];
+
+      for (let idx = 0; idx < rawItems.length; idx++) {
+        const item = rawItems[idx];
+        const qtyProduced = Math.floor(Number(item.quantityProduced ?? item.quantityToProduce ?? 0));
+        const stratConsumed =
+          item.strategicQtyConsumed !== undefined
+            ? Math.floor(Number(item.strategicQtyConsumed))
+            : qtyProduced;
+
+        if (qtyProduced <= 0) {
+          return res
+            .status(400)
+            .json({ error: 'La cantidad producida debe ser mayor a cero.' });
+        }
+
+        const folios: string[] = Array.isArray(item.usedWithdrawalFolios)
+          ? [...item.usedWithdrawalFolios]
+          : [];
+
+        // 1. If an Empaque / Case was selected to discount directly from stock in this Order:
+        const packagingProdId = Number(item.packagingProductId || 0);
+        const shouldDiscountPackaging = item.discountPackagingFromStock !== false;
+        const packagingProd = allProds.find((p) => p.id === packagingProdId);
+
+        if (packagingProd && shouldDiscountPackaging) {
+          // Find warehouse & location where this packaging product has the highest AVAILABLE stock
+          const availBals = allBalances
+            .filter(
+              (b) =>
+                b.productId === packagingProd.id &&
+                b.status === 'AVAILABLE' &&
+                b.quantity > 0
+            )
+            .sort((a, b) => b.quantity - a.quantity);
+
+          const bestBal = availBals[0];
+          if (!bestBal || bestBal.quantity < qtyProduced) {
+            const currentAvail = availBals.reduce((s, b) => s + b.quantity, 0);
+            return res.status(400).json({
+              error: `Stock disponible insuficiente del empaque/case "${packagingProd.name}" (Disponible: ${currentAvail} u., Requerido: ${qtyProduced} u.).`,
+            });
+          }
+
+          const withdrawRes = await withdrawInventoryStock({
+            idempotencyKey: `${req.body.idempotencyKey}_PKG_${idx}`,
+            userId: user.id,
+            warehouseId: bestBal.warehouseId,
+            locationId: bestBal.locationId,
+            productId: packagingProd.id,
+            quantity: qtyProduced,
+            withdrawalMode: 'ORDEN_PRODUCCION',
+            productionOrderId: orderId,
+            recipientOrTarget:
+              item.finishedModelName ||
+              `Armado en Orden #${orderId} (${packagingProd.name})`,
+            reason: `Descuento directo en Orden de Producción (${packagingProd.name})`,
+            notes: item.notes || `Empaque aplicado en orden`,
+          });
+
+          if (withdrawRes?.folio) {
+            folios.push(withdrawRes.folio);
+          }
+        }
+
+        // 2. Resolve or Auto-Create the Finished Product Model
+        let finProdId = Number(item.finishedProductId || 0);
+        const customModelName = String(item.finishedModelName || '').trim();
+
+        if (!finProdId && customModelName) {
+          // Check if a product with this name already exists
+          const existingByName = allProds.find(
+            (p) => p.name.toLowerCase() === customModelName.toLowerCase()
+          );
+          if (existingByName) {
+            finProdId = existingByName.id;
+          } else {
+            // Auto-create the Finished Good product in catalog so the user never has to pre-create it
+            const generatedSku = `PT-${customModelName
+              .toUpperCase()
+              .replace(/[^A-Z0-9]+/g, '-')
+              .replace(/^-|-$/g, '')
+              .slice(0, 14)}-${Date.now().toString().slice(-3)}`;
+
+            const [createdFin] = await db
+              .insert(products)
+              .values({
+                sku: generatedSku,
+                name: customModelName,
+                normalizedKey: normalizeProductKey(
+                  packagingProd?.brand || 'Estándar',
+                  customModelName,
+                  packagingProd?.capacity || 'N/A',
+                  'N/A',
+                  ''
+                ),
+                description: customModelName,
+                family: 'Producto Terminado',
+                productType: 'FINISHED_GOOD',
+                brand: packagingProd?.brand || 'Estándar',
+                model: customModelName,
+                capacity: packagingProd?.capacity || 'N/A',
+                color: 'N/A',
+                material: 'N/A',
+                unitName: 'unidades',
+                unitsPerBox: 1000,
+                imageUrl:
+                  packagingProd?.imageUrl ||
+                  'https://images.unsplash.com/photo-1587829741301-dc798b83add3?auto=format&fit=crop&w=600&q=80',
+                barcode: '',
+                minStockAlert: 100,
+                isActive: true,
+              })
+              .returning();
+
+            allProds.push(createdFin);
+            finProdId = createdFin.id;
+          }
+        }
+
+        // If still no finProdId, fallback to packagingProd or first product
+        if (!finProdId) {
+          finProdId = packagingProd?.id || allProds[0]?.id || 0;
+        }
+
+        resolvedItems.push({
+          finishedProductId: finProdId,
+          quantityProduced: qtyProduced,
+          strategicQtyConsumed: stratConsumed,
+          usedWithdrawalFolios: folios,
+          notes:
+            item.notes ||
+            (packagingProd
+              ? `Armado con ${packagingProd.name} (${qtyProduced} u.)`
+              : ''),
+        });
+      }
+
       const result = await registerProductionBatches({
         idempotencyKey: req.body.idempotencyKey,
         userId: user.id,
-        productionOrderId: Number(req.body.productionOrderId),
-        items: (req.body.items || []).map((i: any) => ({
-          finishedProductId: Number(i.finishedProductId),
-          quantityProduced: Number(i.quantityProduced ?? i.quantityToProduce),
-          strategicQtyConsumed:
-            i.strategicQtyConsumed !== undefined
-              ? Number(i.strategicQtyConsumed)
-              : Number(i.quantityProduced ?? i.quantityToProduce),
-          usedWithdrawalFolios: Array.isArray(i.usedWithdrawalFolios)
-            ? i.usedWithdrawalFolios
-            : [],
-          notes: i.notes || '',
-        })),
+        productionOrderId: orderId,
+        items: resolvedItems,
       });
       return res.json(result);
     } catch (error: any) {

@@ -13,13 +13,13 @@ import {
   X,
   Check,
   Cpu,
+  Box,
 } from 'lucide-react';
 import {
   WorkspaceData,
   ProductionOrder,
   formatInt,
   formatBoliviaDateTime,
-  translateMovementType,
 } from '../types.ts';
 
 interface Props {
@@ -33,7 +33,10 @@ interface Props {
 }
 
 interface BatchLineForm {
+  packagingProductId: number;
+  discountPackagingFromStock: boolean;
   finishedProductId: number;
+  finishedModelName: string;
   quantityProduced: number;
   strategicQtyConsumed: number;
   notes: string;
@@ -43,7 +46,6 @@ export function ProductionAndPickupView({
   data,
   isOnline,
   initialSubView = 'ORDENES',
-  onRequestWithdrawForOrder,
   onNavigateToKardexForOrder,
   apiFetch,
   onRefresh,
@@ -59,13 +61,52 @@ export function ProductionAndPickupView({
   }, [initialSubView]);
 
   const isAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
+  const canProduce = isAdmin || Boolean(data.user.canProduce);
+  const canWithdraw = isAdmin || Boolean(data.user.canWithdraw);
+
+  // Helper: derive a clean finished model name from an Empaque/Case name
+  const suggestFinishedNameFromPackaging = (packagingName: string, strategicName?: string) => {
+    const cleanPack = packagingName
+      .replace(/^(case|empaque|carcasa|blister|caja)\s+/i, '')
+      .trim();
+    const isMicroSd = (strategicName || '').toLowerCase().includes('micro');
+    const prefix = isMicroSd ? 'Memoria' : 'USB';
+    if (!cleanPack) return `${prefix} Terminado`;
+    if (cleanPack.toLowerCase().startsWith('usb') || cleanPack.toLowerCase().startsWith('memoria')) {
+      return cleanPack;
+    }
+    return `${prefix} ${cleanPack}`;
+  };
+
+  // Helper: get predetermined warehouse & location with highest available balance for a product
+  const getPredeterminedStockSource = (productId: number) => {
+    const prodBalances = data.balances
+      .filter((b) => b.productId === productId && b.status === 'AVAILABLE' && b.quantity > 0)
+      .sort((a, b) => b.quantity - a.quantity);
+    const totalAvail = prodBalances.reduce((s, b) => s + b.quantity, 0);
+    const topBal = prodBalances[0];
+    const wh = topBal
+      ? data.allWarehousesSummary.find((w) => w.id === topBal.warehouseId)
+      : undefined;
+    const loc = topBal
+      ? data.allLocationsSummary.find((l) => l.id === topBal.locationId)
+      : undefined;
+    return {
+      totalAvail,
+      warehouseId: topBal?.warehouseId || data.warehouses[0]?.id || 0,
+      locationId: topBal?.locationId || data.allLocationsSummary[0]?.id || 0,
+      warehouseName: wh?.name || 'Almacén',
+      locationName: loc ? `${loc.zoneName} - ${loc.shelfName}` : 'Ubicación principal',
+      topLocationAvail: topBal?.quantity || 0,
+    };
+  };
 
   // =========================================================================
   // 1. MODAL: + NUEVA ORDEN DE PRODUCCIÓN
   // =========================================================================
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [opStrategicId, setOpStrategicId] = useState<number>(0);
-  const [opAuthorizedQty, setOpAuthorizedQty] = useState<number>(4000);
+  const [opAuthorizedQty, setOpAuthorizedQty] = useState<number>(1000);
   const [opSourceWhId, setOpSourceWhId] = useState<number>(data.warehouses[0]?.id || 0);
   const [opTargetWhId, setOpTargetWhId] = useState<number>(
     data.allWarehousesSummary.find((w) => w.isProductionPlant)?.id ||
@@ -76,14 +117,22 @@ export function ProductionAndPickupView({
   const [opInstructions, setOpInstructions] = useState('');
 
   // =========================================================================
-  // 2. MODAL: REGISTRAR PRODUCCIÓN (MULTI-MODELO SIN RECETAS)
+  // 2. MODAL: REGISTRAR PRODUCCIÓN Y USO DE EMPAQUES EN LA ORDEN
   // =========================================================================
   const [produceModalOrder, setProduceModalOrder] = useState<ProductionOrder | null>(null);
   const [batchLines, setBatchLines] = useState<BatchLineForm[]>([]);
   const [selectedWithdrawalFolios, setSelectedWithdrawalFolios] = useState<string[]>([]);
 
   // =========================================================================
-  // 3. MODAL: DEVOLVER SOBRANTES O REPORTAR MERMA DE LA ORDEN
+  // 3. MODAL RÁPIDO: DESCONTAR / ASIGNAR EMPAQUE DIRECTAMENTE EN LA ORDEN
+  // =========================================================================
+  const [assignPackOrder, setAssignPackOrder] = useState<ProductionOrder | null>(null);
+  const [assignPackProductId, setAssignPackProductId] = useState<number>(0);
+  const [assignPackQty, setAssignPackQty] = useState<number>(500);
+  const [assignPackTargetModel, setAssignPackTargetModel] = useState<string>('');
+
+  // =========================================================================
+  // 4. MODAL: DEVOLVER SOBRANTES O REPORTAR MERMA DE LA ORDEN
   // =========================================================================
   const [returnModalOrder, setReturnModalOrder] = useState<ProductionOrder | null>(null);
   const [returnMode, setReturnMode] = useState<'RETURN_TO_ORIGIN' | 'REPORT_WASTE'>(
@@ -106,21 +155,26 @@ export function ProductionAndPickupView({
     (p) =>
       p.productType === 'FINISHED_GOOD' ||
       p.family.toLowerCase().includes('terminado') ||
-      p.name.toLowerCase().includes('terminado') ||
-      p.sku.toLowerCase().startsWith('usb')
+      p.name.toLowerCase().includes('terminado')
   );
-  const selectableFinishedProducts =
-    finishedProducts.length > 0 ? finishedProducts : data.products;
 
   const strategicProducts = data.products.filter(
     (p) =>
       p.productType === 'STRATEGIC_COMPONENT' ||
       p.family.toLowerCase().includes('udp') ||
       p.family.toLowerCase().includes('microsd') ||
-      p.sku.toLowerCase().includes('udp')
+      p.sku.toLowerCase().includes('udp') ||
+      p.name.toLowerCase().includes('udp')
   );
   const selectableStrategicProducts =
     strategicProducts.length > 0 ? strategicProducts : data.products;
+
+  // Empaques / Cases / Secondary supplies available in stock
+  const packagingCandidates = data.products.filter((p) => {
+    const avail = getPredeterminedStockSource(p.id).totalAvail;
+    if (avail <= 0) return false;
+    return true;
+  });
 
   // Compute available stock of selected strategic product in origin warehouse
   const strategicAvailInOrigin = opStrategicId
@@ -137,7 +191,8 @@ export function ProductionAndPickupView({
   // Open New Production Order Modal
   const openCreateOrderModal = () => {
     const firstStrat = selectableStrategicProducts[0]?.id || 0;
-    const defOriginWh = data.warehouses[0]?.id || 0;
+    const pred = getPredeterminedStockSource(firstStrat);
+    const defOriginWh = pred.warehouseId || data.warehouses[0]?.id || 0;
     const defTargetWh =
       data.allWarehousesSummary.find((w) => w.isProductionPlant)?.id ||
       data.allWarehousesSummary[1]?.id ||
@@ -147,7 +202,7 @@ export function ProductionAndPickupView({
     setOpSourceWhId(defOriginWh);
     setOpTargetWhId(defTargetWh);
     setOpAssignedUserId(data.user.id);
-    setOpAuthorizedQty(1000);
+    setOpAuthorizedQty(Math.min(1000, Math.max(100, pred.topLocationAvail || 1000)));
     setOpInstructions('');
     setOrderModalOpen(true);
   };
@@ -156,8 +211,16 @@ export function ProductionAndPickupView({
     e.preventDefault();
     if (!isOnline || !opStrategicId || opAuthorizedQty <= 0) return;
 
-    const srcLoc = data.allLocationsSummary.find((l) => l.warehouseId === opSourceWhId);
-    const dstLoc = data.allLocationsSummary.find((l) => l.warehouseId === opTargetWhId);
+    const srcLoc =
+      data.balances.find(
+        (b) =>
+          b.productId === opStrategicId &&
+          b.warehouseId === opSourceWhId &&
+          b.status === 'AVAILABLE' &&
+          b.quantity >= opAuthorizedQty
+      )?.locationId ||
+      data.allLocationsSummary.find((l) => l.warehouseId === opSourceWhId)?.id;
+    const dstLoc = data.allLocationsSummary.find((l) => l.warehouseId === opTargetWhId)?.id;
     if (!srcLoc || !dstLoc) {
       setFeedback({ type: 'error', text: 'Seleccione almacenes con ubicaciones válidas.' });
       return;
@@ -171,9 +234,9 @@ export function ProductionAndPickupView({
         body: JSON.stringify({
           idempotencyKey: `OP-${Date.now()}`,
           sourceWarehouseId: opSourceWhId,
-          sourceLocationId: srcLoc.id,
+          sourceLocationId: srcLoc,
           targetWarehouseId: opTargetWhId,
-          targetLocationId: dstLoc.id,
+          targetLocationId: dstLoc,
           assignedUserId: opAssignedUserId || data.user.id,
           strategicProductId: opStrategicId,
           authorizedQty: opAuthorizedQty,
@@ -185,9 +248,9 @@ export function ProductionAndPickupView({
       setOrderModalOpen(false);
       setFeedback({
         type: 'success',
-        text: `Orden de Producción ${res.order.orderNumber} creada y ${formatInt(
+        text: `Orden ${res.order.orderNumber} creada con ${formatInt(
           opAuthorizedQty
-        )} unidades enviadas a producción. Confirma la recepción con el botón "Aceptar entrega".`,
+        )} u. Confirma la recepción con el botón "Aceptar entrega".`,
       });
       await onRefresh();
     } catch (err: any) {
@@ -242,7 +305,7 @@ export function ProductionAndPickupView({
         type: 'success',
         text: `Entrega aceptada en producción (${formatInt(
           input.qty
-        )} unidades en custodia listas para transformar).`,
+        )} unidades en custodia listas para armar).`,
       });
       await onRefresh();
     } catch (err: any) {
@@ -252,25 +315,101 @@ export function ProductionAndPickupView({
     }
   };
 
-  // Open Recipe-Free Production Registration Modal
-  const openProduceModal = (order: ProductionOrder) => {
+  // Open Quick Assign / Discount Packaging Modal inside an Order
+  const openAssignPackModal = (order: ProductionOrder) => {
+    const stratProd = data.products.find((p) => p.id === order.strategicProductId);
+    const packCandidates = packagingCandidates.filter((p) => p.id !== order.strategicProductId);
+    const defaultPack = packCandidates[0] || packagingCandidates[0];
     const custodyLeft =
       order.receivedInProductionQty -
       order.consumedQty -
       order.returnedQty -
       order.wasteQty;
-    const defaultFinId = selectableFinishedProducts[0]?.id || 0;
-    const defaultQty = Math.min(1000, Math.max(1, custodyLeft));
+
+    setAssignPackOrder(order);
+    setAssignPackProductId(defaultPack?.id || 0);
+    setAssignPackQty(Math.min(500, Math.max(100, custodyLeft || 500)));
+    setAssignPackTargetModel(
+      defaultPack
+        ? suggestFinishedNameFromPackaging(defaultPack.name, stratProd?.name)
+        : ''
+    );
+  };
+
+  const handleConfirmAssignPack = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !assignPackOrder || !assignPackProductId || assignPackQty <= 0) return;
+
+    const source = getPredeterminedStockSource(assignPackProductId);
+    const packProd = data.products.find((p) => p.id === assignPackProductId);
+    const targetDesc = assignPackTargetModel.trim() || `Armado en ${assignPackOrder.orderNumber}`;
+
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const res = await apiFetch('/api/inventory/withdrawals', {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: `OP-PACK-${assignPackOrder.id}-${Date.now()}`,
+          fromWarehouseId: source.warehouseId,
+          fromLocationId: source.locationId,
+          withdrawalMode: 'PRODUCTION_ORDER',
+          productionOrderId: assignPackOrder.id,
+          recipientOrTarget: `${targetDesc} (${assignPackOrder.orderNumber})`,
+          reason: `Empaque asignado a ${assignPackOrder.orderNumber} para ${targetDesc}`,
+          notes: `Destino: ${targetDesc}`,
+          items: [
+            {
+              productId: assignPackProductId,
+              quantity: assignPackQty,
+            },
+          ],
+        }),
+      });
+      setAssignPackOrder(null);
+      setFeedback({
+        type: 'success',
+        text: `Empaque descontado (${res.folio}): -${formatInt(assignPackQty)} u. de ${
+          packProd?.name || 'Empaque'
+        } desde ${source.warehouseName} → Destino: ${targetDesc}.`,
+      });
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Open Production & Packaging Registration Modal inside an Order
+  const openProduceModal = (order: ProductionOrder) => {
+    const stratProd = data.products.find((p) => p.id === order.strategicProductId);
+    const custodyLeft =
+      order.receivedInProductionQty -
+      order.consumedQty -
+      order.returnedQty -
+      order.wasteQty;
+    const defaultQty = Math.min(500, Math.max(1, custodyLeft));
 
     // Find withdrawals already linked to this order
     const orderWithdrawDocs = data.movementDocuments.filter(
       (d) => d.productionOrderId === order.id && d.movementType === 'RETIRO_PRODUCCION'
     );
 
+    // Candidate empaques (anything other than the strategic product itself)
+    const packOptions = packagingCandidates.filter((p) => p.id !== order.strategicProductId);
+    const firstPack = packOptions[0];
+    const suggestedModel = firstPack
+      ? suggestFinishedNameFromPackaging(firstPack.name, stratProd?.name)
+      : finishedProducts[0]?.name || `Producto Terminado ${stratProd?.name || ''}`.trim();
+
     setProduceModalOrder(order);
     setBatchLines([
       {
-        finishedProductId: defaultFinId,
+        packagingProductId: firstPack?.id || 0,
+        discountPackagingFromStock: orderWithdrawDocs.length === 0 && Boolean(firstPack),
+        finishedProductId: finishedProducts[0]?.id || 0,
+        finishedModelName: suggestedModel,
         quantityProduced: defaultQty,
         strategicQtyConsumed: defaultQty,
         notes: '',
@@ -292,7 +431,12 @@ export function ProductionAndPickupView({
           idempotencyKey: `BATCH-${produceModalOrder.id}-${Date.now()}`,
           productionOrderId: produceModalOrder.id,
           items: batchLines.map((line) => ({
-            finishedProductId: Number(line.finishedProductId),
+            packagingProductId: line.packagingProductId ? Number(line.packagingProductId) : 0,
+            discountPackagingFromStock: Boolean(
+              line.packagingProductId && line.discountPackagingFromStock
+            ),
+            finishedProductId: line.finishedProductId ? Number(line.finishedProductId) : 0,
+            finishedModelName: line.finishedModelName.trim(),
             quantityProduced: Number(line.quantityProduced),
             strategicQtyConsumed: Number(line.strategicQtyConsumed),
             usedWithdrawalFolios: selectedWithdrawalFolios,
@@ -303,13 +447,13 @@ export function ProductionAndPickupView({
       setProduceModalOrder(null);
       setFeedback({
         type: 'success',
-        text: `Producción registrada (${res.folio}): Se crearon +${formatInt(
+        text: `Producción registrada (${res.folio}): +${formatInt(
           res.totalFinishedProduced
-        )} productos terminados consumiendo ${formatInt(
+        )} terminados creados y -${formatInt(
           res.totalStrategicConsumed
-        )} componentes en custodia. Quedan ${formatInt(
+        )} componentes consumidos. Quedan ${formatInt(
           res.remainingCustodyQty
-        )} u. en custodia de la orden.`,
+        )} u. en custodia.`,
       });
       await onRefresh();
     } catch (err: any) {
@@ -329,7 +473,7 @@ export function ProductionAndPickupView({
     setReturnModalOrder(order);
     setReturnMode('RETURN_TO_ORIGIN');
     setReturnQty(custodyLeft);
-    setReturnReason('Devolución de sobrantes no utilizados al almacén de origen');
+    setReturnReason('Devolución de sobrantes al almacén de origen');
   };
 
   const handleConfirmReturnOrWaste = async (e: React.FormEvent) => {
@@ -356,7 +500,7 @@ export function ProductionAndPickupView({
           returnMode === 'RETURN_TO_ORIGIN'
             ? `Se devolvieron ${formatInt(returnQty)} unidades sobrantes al almacén de origen (${
                 res.folio
-              }). El stock disponible se incrementó inmediatamente.`
+              }).`
             : `Merma de ${formatInt(returnQty)} unidades registrada en la orden (${res.folio}).`,
       });
       await onRefresh();
@@ -403,7 +547,7 @@ export function ProductionAndPickupView({
         text: fgDirectReceive
           ? `Recogida confirmada (${res.folio}): +${formatInt(
               qty
-            )} productos terminados ya están DISPONIBLES en el almacén destino (sin doble descuento de insumos).`
+            )} productos terminados ya están DISPONIBLES en el almacén destino.`
           : `Entrega ${res.dispatch.dispatchFolio} despachada (${formatInt(
               qty
             )} unidades en tránsito).`,
@@ -444,7 +588,7 @@ export function ProductionAndPickupView({
 
   return (
     <div className="space-y-6">
-      {/* Sub-navigation (Strictly Orders & Finished Goods Pickups — Zero Recipes) */}
+      {/* Sub-navigation */}
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
         <div className="flex flex-wrap items-center gap-2">
           <button
@@ -471,7 +615,7 @@ export function ProductionAndPickupView({
           </button>
         </div>
 
-        {isAdmin && subTab === 'ORDENES' && (
+        {canProduce && subTab === 'ORDENES' && (
           <button
             type="button"
             onClick={openCreateOrderModal}
@@ -501,22 +645,21 @@ export function ProductionAndPickupView({
       )}
 
       {/* ===================================================================== */}
-      {/* TAB 1: ÓRDENES DE PRODUCCIÓN (SIN RECETAS)                            */}
+      {/* TAB 1: ÓRDENES DE PRODUCCIÓN                                          */}
       {/* ===================================================================== */}
       {subTab === 'ORDENES' && (
         <div className="space-y-6">
           <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-4 shadow-2xs">
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                Control de Órdenes de Producción y Custodia de Componentes
+                Órdenes de Producción y Asignación de Empaques / Cases
               </h2>
               <p className="text-xs text-slate-600 mt-0.5">
-                Entrega componentes estratégicos (UDP o microSD) a producción, retira empaques/cases
-                con el botón Retirar, registra los modelos terminados sin recetas y devuelve
-                sobrantes.
+                Desde cada orden puedes descontar directamente los empaques/cases de su almacén
+                indicando qué modelo se está armando y cuántas unidades van a cada destino.
               </p>
             </div>
-            {isAdmin && (
+            {canProduce && (
               <button
                 type="button"
                 onClick={openCreateOrderModal}
@@ -537,10 +680,10 @@ export function ProductionAndPickupView({
               </h3>
               <p className="text-xs text-slate-600 leading-relaxed">
                 Haz clic en <strong>"+ Nueva orden de producción"</strong> para entregar un lote de
-                componentes (por ejemplo: 4,000 UDP 8 GB) desde tu almacén principal hacia el área
-                de producción.
+                componentes (por ejemplo: 1,000 UDP) hacia producción y reportar ahí mismo los
+                empaques utilizados.
               </p>
-              {isAdmin && (
+              {canProduce && (
                 <button
                   type="button"
                   onClick={openCreateOrderModal}
@@ -628,7 +771,7 @@ export function ProductionAndPickupView({
                             </span>
                           </div>
                           <h3 className="text-base font-bold text-slate-900 mt-1">
-                            Componente Estratégico: {stratProd?.name} ({stratProd?.sku})
+                            Componente Principal: {stratProd?.name} ({stratProd?.sku})
                           </h3>
                           {order.instructions && (
                             <p className="text-xs text-slate-600 mt-0.5">
@@ -640,7 +783,7 @@ export function ProductionAndPickupView({
 
                       {/* Order Action Toolbar */}
                       <div className="flex flex-wrap items-center gap-2">
-                        {order.reservedQty > 0 && isAdmin && (
+                        {order.reservedQty > 0 && canProduce && (
                           <button
                             type="button"
                             disabled={submitting}
@@ -651,25 +794,25 @@ export function ProductionAndPickupView({
                           </button>
                         )}
 
-                        {onRequestWithdrawForOrder && (
+                        {canWithdraw && (
                           <button
                             type="button"
-                            onClick={() => onRequestWithdrawForOrder(order.id)}
+                            onClick={() => openAssignPackModal(order)}
                             className="px-3.5 py-2 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-xl flex items-center gap-1.5 cursor-pointer"
                           >
                             <ArrowUpFromLine className="w-3.5 h-3.5" />
-                            Retirar insumos
+                            Descontar empaque / case
                           </button>
                         )}
 
-                        {custodyLeft > 0 && (
+                        {custodyLeft > 0 && canProduce && (
                           <button
                             type="button"
                             onClick={() => openProduceModal(order)}
                             className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-2xs"
                           >
                             <Plus className="w-3.5 h-3.5" />
-                            Registrar producción
+                            Registrar armado / producción
                           </button>
                         )}
 
@@ -684,7 +827,7 @@ export function ProductionAndPickupView({
                           </button>
                         )}
 
-                        {custodyLeft > 0 && (
+                        {custodyLeft > 0 && canProduce && (
                           <button
                             type="button"
                             onClick={() => openReturnModal(order)}
@@ -793,46 +936,57 @@ export function ProductionAndPickupView({
                       </div>
                     </div>
 
-                    {/* Two-Column Breakdown: Secondary Supplies Withdrawn vs Finished Batches Produced */}
+                    {/* Two-Column Breakdown: Empaques Descontados y Destino vs Lotes Terminados */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-1">
                       {/* Withdrawn Secondary Supplies for this Order */}
-                      <div className="p-4 rounded-xl bg-slate-50/80 border border-slate-200/80 space-y-2.5 text-xs">
+                      <div className="p-4 rounded-xl bg-amber-50/40 border border-amber-200/80 space-y-2.5 text-xs">
                         <div className="flex items-center justify-between">
-                          <span className="font-bold text-slate-800">
-                            Insumos Retirados para esta Orden ({orderWithdrawalLines.length})
+                          <span className="font-bold text-amber-950">
+                            Empaques / Cases Descontados en esta Orden ({orderWithdrawalLines.length})
                           </span>
-                          {onRequestWithdrawForOrder && (
+                          {canWithdraw && (
                             <button
                               type="button"
-                              onClick={() => onRequestWithdrawForOrder(order.id)}
-                              className="text-[11px] font-bold text-amber-700 hover:underline cursor-pointer"
+                              onClick={() => openAssignPackModal(order)}
+                              className="text-[11px] font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg cursor-pointer"
                             >
-                              + Retirar más empaques/cases
+                              + Descontar empaque aquí
                             </button>
                           )}
                         </div>
                         {orderWithdrawalLines.length === 0 ? (
-                          <div className="text-slate-400 py-2">
-                            Aún no se han retirado empaques, cases o adaptadores vinculados a esta
-                            orden.
+                          <div className="text-slate-500 py-2">
+                            Al registrar el armado o hacer clic en{' '}
+                            <strong>"Descontar empaque / case"</strong>, se descontarán
+                            automáticamente de su almacén y verás aquí a qué modelo fueron.
                           </div>
                         ) : (
                           <div className="space-y-1.5">
                             {orderWithdrawalLines.map((wl) => {
                               const wDoc = orderWithdrawalDocs.find((d) => d.id === wl.documentId);
+                              const fromWh = data.allWarehousesSummary.find(
+                                (w) => w.id === wDoc?.sourceWarehouseId
+                              );
                               return (
                                 <div
                                   key={wl.id}
-                                  className="p-2 bg-white rounded-lg border border-slate-200/80 flex items-center justify-between gap-2"
+                                  className="p-2.5 bg-white rounded-lg border border-amber-200/90 flex items-center justify-between gap-2"
                                 >
                                   <div className="min-w-0">
-                                    <span className="font-mono font-bold text-amber-800">
-                                      {wDoc?.folio}
-                                    </span>{' '}
-                                    · <strong>{wl.historicalSku}</strong> — {wl.historicalName}
+                                    <div className="font-bold text-slate-900 truncate">
+                                      {wl.historicalName}{' '}
+                                      <span className="font-mono text-[11px] text-slate-500">
+                                        ({wl.historicalSku})
+                                      </span>
+                                    </div>
+                                    <div className="text-[11px] text-amber-900 mt-0.5">
+                                      Salió de: <strong>{fromWh?.name || 'Almacén'}</strong> →{' '}
+                                      <span>Destino: </span>
+                                      <strong>{wDoc?.recipientOrTarget || 'Producción'}</strong>
+                                    </div>
                                   </div>
-                                  <span className="font-mono font-bold text-slate-900 shrink-0">
-                                    {formatInt(wl.quantity)} u.
+                                  <span className="font-mono font-extrabold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg shrink-0">
+                                    -{formatInt(wl.quantity)} u.
                                   </span>
                                 </div>
                               );
@@ -845,7 +999,7 @@ export function ProductionAndPickupView({
                       <div className="p-4 rounded-xl bg-emerald-50/40 border border-emerald-200/80 space-y-2.5 text-xs">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-emerald-950">
-                            Productos Terminados Fabricados en esta Orden ({orderBatches.length})
+                            Productos Terminados Armados en esta Orden ({orderBatches.length})
                           </span>
                           <span className="font-mono font-bold text-emerald-800">
                             Total:{' '}
@@ -856,8 +1010,9 @@ export function ProductionAndPickupView({
                           </span>
                         </div>
                         {orderBatches.length === 0 ? (
-                          <div className="text-slate-400 py-2">
-                            Aún no se han registrado lotes de productos terminados en esta orden.
+                          <div className="text-slate-500 py-2">
+                            Aún no se han registrado modelos terminados en esta orden. Haz clic en{' '}
+                            <strong>"Registrar armado / producción"</strong>.
                           </div>
                         ) : (
                           <div className="space-y-1.5">
@@ -866,16 +1021,17 @@ export function ProductionAndPickupView({
                               return (
                                 <div
                                   key={b.id}
-                                  className="p-2 bg-white rounded-lg border border-emerald-200/80 flex items-center justify-between gap-2"
+                                  className="p-2.5 bg-white rounded-lg border border-emerald-200/80 flex items-center justify-between gap-2"
                                 >
                                   <div className="min-w-0">
                                     <span className="font-mono font-bold text-emerald-700">
                                       {b.batchFolio}
                                     </span>{' '}
-                                    · <strong>{fp?.sku}</strong> — {fp?.name}
+                                    · <strong>{fp?.name}</strong>{' '}
+                                    <span className="text-slate-400 font-mono">({fp?.sku})</span>
                                     {b.usedWithdrawalFolios && (
-                                      <span className="block text-[10px] text-slate-400">
-                                        Insumos vinculados: {b.usedWithdrawalFolios}
+                                      <span className="block text-[10px] text-slate-500 mt-0.5">
+                                        Empaque descontado: {b.usedWithdrawalFolios}
                                       </span>
                                     )}
                                   </div>
@@ -913,9 +1069,8 @@ export function ProductionAndPickupView({
                 Productos Terminados y Recogidas (Parciales o Totales)
               </h2>
               <p className="text-xs text-slate-600 mt-0.5">
-                Recoge productos ya terminados (por ejemplo: recoger 2,000 de 3,500 unidades) y
-                pásalos a stock disponible en el almacén destino <strong>sin volver a descontar</strong>{' '}
-                UDP ni empaques.
+                Recoge productos ya terminados y pásalos a stock disponible en el almacén destino{' '}
+                <strong>sin volver a descontar</strong> UDP ni empaques.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
@@ -951,7 +1106,7 @@ export function ProductionAndPickupView({
                 No hay productos terminados pendientes de recogida
               </h3>
               <p className="text-xs text-slate-500">
-                Cuando registres producción en una Orden de Producción, los productos terminados
+                Cuando registres el armado en una Orden de Producción, los productos terminados
                 aparecerán aquí listos para su recogida parcial o total.
               </p>
             </div>
@@ -1120,14 +1275,14 @@ export function ProductionAndPickupView({
       {/* ===================================================================== */}
       {orderModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200 my-8">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-900">
                   Nueva Orden de Producción
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Asigna y envía componentes estratégicos (UDP / microSD) a custodia de producción
+                  Selecciona el componente principal (UDP / microSD) y la cantidad a trabajar
                 </p>
               </div>
               <button
@@ -1138,58 +1293,41 @@ export function ProductionAndPickupView({
               </button>
             </div>
 
-            <form onSubmit={handleCreateOrder} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Almacén de Origen (Salida) *
-                  </label>
-                  <select
-                    value={opSourceWhId}
-                    onChange={(e) => setOpSourceWhId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Almacén / Taller de Producción *
-                  </label>
-                  <select
-                    value={opTargetWhId}
-                    onChange={(e) => setOpTargetWhId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
-                  >
-                    {data.allWarehousesSummary.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
+            <form onSubmit={handleCreateOrder} className="space-y-3.5 text-xs">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  Componente Estratégico a Entregar (UDP / microSD) *
+                  Componente Principal (UDP / microSD) *
                 </label>
                 <select
                   value={opStrategicId}
-                  onChange={(e) => setOpStrategicId(Number(e.target.value))}
+                  onChange={(e) => {
+                    const newId = Number(e.target.value);
+                    setOpStrategicId(newId);
+                    const pred = getPredeterminedStockSource(newId);
+                    if (pred.warehouseId) setOpSourceWhId(pred.warehouseId);
+                  }}
                   className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
                 >
-                  {selectableStrategicProducts.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.sku} — {p.name} ({p.family})
-                    </option>
-                  ))}
+                  {selectableStrategicProducts.map((p) => {
+                    const src = getPredeterminedStockSource(p.id);
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.name} — Disp: {formatInt(src.totalAvail)} u. ({src.warehouseName})
+                      </option>
+                    );
+                  })}
                 </select>
+              </div>
+
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                <span className="text-slate-600">
+                  Saliendo de: <strong className="text-slate-900">{
+                    data.allWarehousesSummary.find((w) => w.id === opSourceWhId)?.name || 'Almacén'
+                  }</strong>
+                </span>
+                <span className="font-mono font-bold text-sky-700">
+                  Disp: {formatInt(strategicAvailInOrigin)} u.
+                </span>
               </div>
 
               <div>
@@ -1198,11 +1336,17 @@ export function ProductionAndPickupView({
                     Cantidad a Entregar a la Orden *
                   </label>
                   <div className="flex items-center gap-1">
-                    {[500, 1000, 2000, 4000, 5000].map((preset) => (
+                    {[500, 1000, 2000, 5000].map((preset) => (
                       <button
                         key={preset}
                         type="button"
-                        onClick={() => setOpAuthorizedQty(preset)}
+                        onClick={() =>
+                          setOpAuthorizedQty(
+                            strategicAvailInOrigin > 0
+                              ? Math.min(strategicAvailInOrigin, preset)
+                              : preset
+                          )
+                        }
                         className="px-2 py-0.5 text-[11px] font-mono font-bold bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 rounded-md cursor-pointer"
                       >
                         {formatInt(preset)}
@@ -1218,83 +1362,35 @@ export function ProductionAndPickupView({
                   onChange={(e) =>
                     setOpAuthorizedQty(Math.max(1, Math.floor(Number(e.target.value))))
                   }
-                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5"
+                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2"
                   required
                 />
                 {opAuthorizedQty > strategicAvailInOrigin && (
                   <p className="text-red-600 font-semibold mt-1 flex items-center gap-1">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                    Stock disponible insuficiente en el almacén de origen (Disponible:{' '}
-                    {formatInt(strategicAvailInOrigin)} u.).
+                    Stock disponible insuficiente ({formatInt(strategicAvailInOrigin)} u.).
                   </p>
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Operario Responsable *
-                  </label>
-                  <select
-                    value={opAssignedUserId}
-                    onChange={(e) => setOpAssignedUserId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white"
-                  >
-                    {data.usersPublic.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.fullName} ({u.username})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Modelos sugeridos / Observaciones
-                  </label>
-                  <input
-                    type="text"
-                    value={opInstructions}
-                    onChange={(e) => setOpInstructions(e.target.value)}
-                    placeholder="Ej. Armar HP, Sony y Samsung 8 GB"
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
-                  />
-                </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Observación opcional
+                </label>
+                <input
+                  type="text"
+                  value={opInstructions}
+                  onChange={(e) => setOpInstructions(e.target.value)}
+                  placeholder="Ej. Armado Samsung / HP"
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
+                />
               </div>
 
-              {/* Live Mathematical Preview */}
-              <div className="p-3.5 bg-sky-50 border border-sky-200 rounded-xl grid grid-cols-3 gap-2 text-center">
-                <div>
-                  <div className="text-[11px] text-sky-900">Disponible en Origen</div>
-                  <div className="text-base font-mono font-bold text-slate-900">
-                    {formatInt(strategicAvailInOrigin)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] text-sky-900">Asignado a OP</div>
-                  <div className="text-base font-mono font-bold text-sky-700">
-                    -{formatInt(opAuthorizedQty)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] font-bold text-sky-950">Disponible Restante</div>
-                  <div
-                    className={`text-base font-mono font-extrabold ${
-                      strategicAvailInOrigin - opAuthorizedQty < 0
-                        ? 'text-red-600'
-                        : 'text-emerald-800'
-                    }`}
-                  >
-                    {formatInt(strategicAvailInOrigin - opAuthorizedQty)}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => setOrderModalOpen(false)}
-                  className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
                 >
                   Cancelar
                 </button>
@@ -1305,10 +1401,10 @@ export function ProductionAndPickupView({
                     opAuthorizedQty <= 0 ||
                     opAuthorizedQty > strategicAvailInOrigin
                   }
-                  className="px-5 py-2.5 font-bold text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer"
+                  className="px-5 py-2 font-bold text-white bg-sky-600 hover:bg-sky-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer"
                 >
                   <Check className="w-4 h-4" />
-                  {submitting ? 'Creando orden...' : 'Confirmar y Enviar a Producción'}
+                  {submitting ? 'Creando...' : 'Crear Orden'}
                 </button>
               </div>
             </form>
@@ -1317,11 +1413,161 @@ export function ProductionAndPickupView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL 2: REGISTRAR PRODUCCIÓN (MULTI-MODELO SIN RECETAS)              */}
+      {/* MODAL RÁPIDO: DESCONTAR EMPAQUE / CASE DIRECTAMENTE EN LA ORDEN       */}
+      {/* ===================================================================== */}
+      {assignPackOrder && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200">
+            {(() => {
+              const packSource = getPredeterminedStockSource(assignPackProductId);
+              const afterStock = packSource.totalAvail - assignPackQty;
+              return (
+                <>
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                    <div>
+                      <span className="font-mono text-xs font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                        {assignPackOrder.orderNumber}
+                      </span>
+                      <h3 className="text-base font-bold text-slate-900 mt-1">
+                        Descontar Empaque / Case en esta Orden
+                      </h3>
+                    </div>
+                    <button
+                      onClick={() => setAssignPackOrder(null)}
+                      className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleConfirmAssignPack} className="space-y-3.5 text-xs">
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        Empaque / Case a descontar *
+                      </label>
+                      <select
+                        value={assignPackProductId}
+                        onChange={(e) => {
+                          const newId = Number(e.target.value);
+                          setAssignPackProductId(newId);
+                          const p = data.products.find((pr) => pr.id === newId);
+                          const strat = data.products.find(
+                            (pr) => pr.id === assignPackOrder.strategicProductId
+                          );
+                          if (p) {
+                            setAssignPackTargetModel(
+                              suggestFinishedNameFromPackaging(p.name, strat?.name)
+                            );
+                          }
+                        }}
+                        className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
+                      >
+                        {packagingCandidates.map((p) => {
+                          const src = getPredeterminedStockSource(p.id);
+                          return (
+                            <option key={p.id} value={p.id}>
+                              {p.name} — Disp: {formatInt(src.totalAvail)} u. ({src.warehouseName})
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* Predetermined origin badge */}
+                    <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between">
+                      <span className="text-slate-600">
+                        Saliendo de:{' '}
+                        <strong className="text-slate-900">
+                          {packSource.warehouseName} · {packSource.locationName}
+                        </strong>
+                      </span>
+                      <span className="font-mono font-bold text-amber-800">
+                        {formatInt(packSource.totalAvail)} → {formatInt(Math.max(0, afterStock))} u.
+                      </span>
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="font-bold text-slate-700">
+                          Cantidad de Empaques *
+                        </label>
+                        <div className="flex items-center gap-1">
+                          {[100, 500, 1000, 2000].map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() =>
+                                setAssignPackQty(Math.min(packSource.totalAvail || preset, preset))
+                              }
+                              className="px-2 py-0.5 text-[11px] font-mono font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-md cursor-pointer"
+                            >
+                              {formatInt(preset)}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <input
+                        type="number"
+                        min={1}
+                        max={packSource.totalAvail || undefined}
+                        value={assignPackQty}
+                        onChange={(e) =>
+                          setAssignPackQty(Math.max(1, Math.floor(Number(e.target.value))))
+                        }
+                        className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        ¿A dónde van estos empaques? (Modelo que se arma) *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={assignPackTargetModel}
+                        onChange={(e) => setAssignPackTargetModel(e.target.value)}
+                        placeholder="Ej. USB Samsung 8gb"
+                        className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 font-semibold"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                      <button
+                        type="button"
+                        onClick={() => setAssignPackOrder(null)}
+                        className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={
+                          submitting ||
+                          !assignPackProductId ||
+                          assignPackQty <= 0 ||
+                          assignPackQty > packSource.totalAvail
+                        }
+                        className="px-5 py-2 font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl cursor-pointer"
+                      >
+                        {submitting ? 'Descontando...' : 'Descontar Empaque'}
+                      </button>
+                    </div>
+                  </form>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 2: REGISTRAR ARMADO / PRODUCCIÓN Y DESCONTAR EMPAQUES           */}
       {/* ===================================================================== */}
       {produceModalOrder && (
         <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-5 space-y-4 shadow-2xl border border-slate-200 my-8">
             {(() => {
               const stratProd = data.products.find(
                 (p) => p.id === produceModalOrder.strategicProductId
@@ -1340,25 +1586,23 @@ export function ProductionAndPickupView({
                 0
               );
 
-              const orderWithdrawDocs = data.movementDocuments.filter(
-                (d) =>
-                  d.productionOrderId === produceModalOrder.id &&
-                  d.movementType === 'RETIRO_PRODUCCION'
+              const packOptions = packagingCandidates.filter(
+                (p) => p.id !== produceModalOrder.strategicProductId
               );
 
               return (
                 <>
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-3">
                     <div>
                       <span className="font-mono text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                         {produceModalOrder.orderNumber}
                       </span>
                       <h3 className="text-base font-bold text-slate-900 mt-1">
-                        Registrar Productos Terminados Fabricados (Sin Recetas)
+                        Registrar Armado y Uso de Empaques
                       </h3>
                       <p className="text-xs text-slate-500">
-                        Agrega uno o varios modelos terminados (ej. HP, Sony, Samsung) y consume el
-                        componente en custodia sin volver a descontar empaques ya retirados.
+                        Selecciona el empaque/case utilizado, la cantidad armada y a qué producto
+                        terminado va.
                       </p>
                     </div>
                     <button
@@ -1370,203 +1614,213 @@ export function ProductionAndPickupView({
                   </div>
 
                   <form onSubmit={handleConfirmProductionBatch} className="space-y-4 text-xs">
-                    {/* Lines of Finished Products */}
                     <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <label className="font-bold text-slate-800">
-                          Líneas de Productos Terminados Obtenidos:
-                        </label>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setBatchLines([
-                              ...batchLines,
-                              {
-                                finishedProductId: selectableFinishedProducts[0]?.id || 0,
-                                quantityProduced: 500,
-                                strategicQtyConsumed: 500,
-                                notes: '',
-                              },
-                            ])
-                          }
-                          className="px-3 py-1.5 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 rounded-xl font-bold cursor-pointer"
-                        >
-                          + Agregar otro modelo / marca en esta orden
-                        </button>
-                      </div>
+                      {batchLines.map((line, idx) => {
+                        const packSource = line.packagingProductId
+                          ? getPredeterminedStockSource(line.packagingProductId)
+                          : null;
+                        return (
+                          <div
+                            key={idx}
+                            className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-slate-800 flex items-center gap-1.5">
+                                <Box className="w-3.5 h-3.5 text-emerald-600" />
+                                Lote #{idx + 1}
+                              </span>
+                              {batchLines.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setBatchLines(batchLines.filter((_, i) => i !== idx))
+                                  }
+                                  className="text-red-600 hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" /> Quitar
+                                </button>
+                              )}
+                            </div>
 
-                      {batchLines.map((line, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3"
-                        >
-                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                            <div className="sm:col-span-1">
-                              <label className="block font-semibold text-slate-700 mb-1">
-                                Producto Terminado *
+                            {/* 1. Empaque / Case Utilizado */}
+                            <div>
+                              <label className="block font-bold text-slate-700 mb-1">
+                                1. Empaque / Case utilizado
                               </label>
                               <select
-                                value={line.finishedProductId}
+                                value={line.packagingProductId}
                                 onChange={(e) => {
+                                  const packId = Number(e.target.value);
+                                  const packProd = data.products.find((p) => p.id === packId);
                                   const copy = [...batchLines];
-                                  copy[idx].finishedProductId = Number(e.target.value);
+                                  copy[idx].packagingProductId = packId;
+                                  if (packId > 0 && packProd) {
+                                    copy[idx].discountPackagingFromStock = true;
+                                    copy[idx].finishedModelName = suggestFinishedNameFromPackaging(
+                                      packProd.name,
+                                      stratProd?.name
+                                    );
+                                  } else {
+                                    copy[idx].discountPackagingFromStock = false;
+                                  }
                                   setBatchLines(copy);
                                 }}
-                                className="w-full border border-slate-300 rounded-lg px-2.5 py-2 bg-white font-semibold"
+                                className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white font-semibold"
                               >
-                                {selectableFinishedProducts.map((p) => (
-                                  <option key={p.id} value={p.id}>
-                                    {p.sku} — {p.name}
-                                  </option>
-                                ))}
+                                <option value={0}>
+                                  -- Sin descontar empaque adicional (o ya descontado antes) --
+                                </option>
+                                {packOptions.map((p) => {
+                                  const src = getPredeterminedStockSource(p.id);
+                                  return (
+                                    <option key={p.id} value={p.id}>
+                                      {p.name} — Disp: {formatInt(src.totalAvail)} u. en{' '}
+                                      {src.warehouseName}
+                                    </option>
+                                  );
+                                })}
                               </select>
+
+                              {line.packagingProductId > 0 && packSource && (
+                                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 bg-amber-50/80 border border-amber-200 rounded-lg text-[11px]">
+                                  <label className="flex items-center gap-1.5 font-semibold text-amber-950 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={line.discountPackagingFromStock}
+                                      onChange={(e) => {
+                                        const copy = [...batchLines];
+                                        copy[idx].discountPackagingFromStock = e.target.checked;
+                                        setBatchLines(copy);
+                                      }}
+                                    />
+                                    Descontar {formatInt(line.quantityProduced)} u. de{' '}
+                                    {packSource.warehouseName}
+                                  </label>
+                                  {line.discountPackagingFromStock && (
+                                    <span className="font-mono font-bold text-amber-800">
+                                      Stock: {formatInt(packSource.totalAvail)} →{' '}
+                                      {formatInt(
+                                        Math.max(0, packSource.totalAvail - line.quantityProduced)
+                                      )}{' '}
+                                      u.
+                                    </span>
+                                  )}
+                                </div>
+                              )}
                             </div>
 
-                            <div>
-                              <label className="block font-semibold text-slate-700 mb-1">
-                                Cantidad Producida *
-                              </label>
-                              <input
-                                type="number"
-                                min={1}
-                                step={1}
-                                value={line.quantityProduced}
-                                onChange={(e) => {
-                                  const val = Math.max(1, Math.floor(Number(e.target.value)));
-                                  const copy = [...batchLines];
-                                  copy[idx].quantityProduced = val;
-                                  copy[idx].strategicQtyConsumed = val; // default 1:1
-                                  setBatchLines(copy);
-                                }}
-                                className="w-full font-mono font-bold text-sm border border-slate-300 rounded-lg px-2.5 py-2 bg-white"
-                                required
-                              />
-                            </div>
-
-                            <div>
-                              <label className="block font-semibold text-slate-700 mb-1">
-                                {stratProd?.sku || 'UDP'} Consumidos *
-                              </label>
-                              <div className="flex items-center gap-1.5">
+                            {/* 2. Cantidad y Producto / Modelo Terminado */}
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div>
+                                <div className="flex items-center justify-between mb-1">
+                                  <label className="font-bold text-slate-700">
+                                    2. Cantidad Armada *
+                                  </label>
+                                  <div className="flex items-center gap-1">
+                                    {[100, 500, 1000].map((preset) => (
+                                      <button
+                                        key={preset}
+                                        type="button"
+                                        onClick={() => {
+                                          const val = Math.min(custodyLeft || preset, preset);
+                                          const copy = [...batchLines];
+                                          copy[idx].quantityProduced = val;
+                                          copy[idx].strategicQtyConsumed = val;
+                                          setBatchLines(copy);
+                                        }}
+                                        className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-white border border-slate-300 rounded cursor-pointer"
+                                      >
+                                        {preset}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
                                 <input
                                   type="number"
                                   min={1}
-                                  step={1}
-                                  value={line.strategicQtyConsumed}
+                                  max={custodyLeft}
+                                  value={line.quantityProduced}
                                   onChange={(e) => {
                                     const val = Math.max(1, Math.floor(Number(e.target.value)));
                                     const copy = [...batchLines];
+                                    copy[idx].quantityProduced = val;
                                     copy[idx].strategicQtyConsumed = val;
                                     setBatchLines(copy);
                                   }}
-                                  className="w-full font-mono font-bold text-sm border border-slate-300 rounded-lg px-2.5 py-2 bg-white"
+                                  className="w-full font-mono font-bold text-base border border-slate-300 rounded-xl px-3 py-2 bg-white"
                                   required
                                 />
-                                {batchLines.length > 1 && (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      setBatchLines(batchLines.filter((_, i) => i !== idx))
-                                    }
-                                    className="p-2 text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                )}
+                              </div>
+
+                              <div>
+                                <label className="block font-bold text-slate-700 mb-1">
+                                  3. ¿A dónde va / Modelo Terminado? *
+                                </label>
+                                <input
+                                  type="text"
+                                  required
+                                  value={line.finishedModelName}
+                                  onChange={(e) => {
+                                    const copy = [...batchLines];
+                                    copy[idx].finishedModelName = e.target.value;
+                                    setBatchLines(copy);
+                                  }}
+                                  placeholder="Ej. USB Samsung 8gb"
+                                  className="w-full text-sm font-semibold border border-slate-300 rounded-xl px-3 py-2 bg-white"
+                                />
                               </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
+                        );
+                      })}
 
-                    {/* Reference Withdrawn Supplies without Double Deduction */}
-                    <div className="p-3.5 bg-amber-50/70 border border-amber-200 rounded-xl space-y-2">
-                      <div className="font-bold text-amber-950">
-                        Insumos secundarios ya retirados para esta orden (Sin doble descuento):
-                      </div>
-                      {orderWithdrawDocs.length === 0 ? (
-                        <div className="text-amber-900 text-[11px]">
-                          No hay retiros previos registrados en esta orden, o puedes retirarlos con
-                          el botón "Retirar insumos".
-                        </div>
-                      ) : (
-                        <div className="flex flex-wrap gap-2">
-                          {orderWithdrawDocs.map((d) => {
-                            const checked = selectedWithdrawalFolios.includes(d.folio);
-                            return (
-                              <label
-                                key={d.id}
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-white border border-amber-300 rounded-lg cursor-pointer"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={(e) => {
-                                    if (e.target.checked) {
-                                      setSelectedWithdrawalFolios([
-                                        ...selectedWithdrawalFolios,
-                                        d.folio,
-                                      ]);
-                                    } else {
-                                      setSelectedWithdrawalFolios(
-                                        selectedWithdrawalFolios.filter((f) => f !== d.folio)
-                                      );
-                                    }
-                                  }}
-                                />
-                                <span className="font-mono font-bold text-amber-900">
-                                  {d.folio}
-                                </span>
-                                <span className="text-slate-600">({d.recipientOrTarget})</span>
-                              </label>
-                            );
-                          })}
-                        </div>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const firstPack = packOptions[0];
+                          setBatchLines([
+                            ...batchLines,
+                            {
+                              packagingProductId: firstPack?.id || 0,
+                              discountPackagingFromStock: Boolean(firstPack),
+                              finishedProductId: 0,
+                              finishedModelName: firstPack
+                                ? suggestFinishedNameFromPackaging(firstPack.name, stratProd?.name)
+                                : `USB Terminado`,
+                              quantityProduced: Math.min(
+                                500,
+                                Math.max(1, custodyLeft - totalStrategicToConsume)
+                              ),
+                              strategicQtyConsumed: Math.min(
+                                500,
+                                Math.max(1, custodyLeft - totalStrategicToConsume)
+                              ),
+                              notes: '',
+                            },
+                          ]);
+                        }}
+                        className="w-full py-2 bg-sky-50 hover:bg-sky-100 text-sky-800 border border-sky-200 rounded-xl font-bold cursor-pointer"
+                      >
+                        + Agregar otro modelo / empaque en esta misma orden
+                      </button>
                     </div>
 
                     {/* Custody Conservation Preview */}
-                    <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl grid grid-cols-4 gap-2 text-center">
-                      <div>
-                        <div className="text-[11px] text-emerald-900">Custodia Actual</div>
-                        <div className="text-sm font-mono font-bold text-slate-900">
-                          {formatInt(custodyLeft)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-emerald-900">UDP a Consumir</div>
-                        <div className="text-sm font-mono font-bold text-amber-700">
-                          -{formatInt(totalStrategicToConsume)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-emerald-900">Terminados a Crear</div>
-                        <div className="text-sm font-mono font-bold text-emerald-700">
-                          +{formatInt(totalToProduce)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] font-bold text-emerald-950">
-                          Custodia Restante
-                        </div>
-                        <div
-                          className={`text-sm font-mono font-extrabold ${
-                            custodyLeft - totalStrategicToConsume < 0
-                              ? 'text-red-600'
-                              : 'text-sky-800'
-                          }`}
-                        >
-                          {formatInt(custodyLeft - totalStrategicToConsume)}
-                        </div>
-                      </div>
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between">
+                      <span className="text-emerald-950 font-semibold">
+                        Custodia de <strong>{stratProd?.name}</strong>:
+                      </span>
+                      <span className="font-mono font-extrabold text-sm text-emerald-800">
+                        {formatInt(custodyLeft)} →{' '}
+                        {formatInt(custodyLeft - totalStrategicToConsume)} u.
+                      </span>
                     </div>
 
-                    <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
                       <button
                         type="button"
                         onClick={() => setProduceModalOrder(null)}
-                        className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
+                        className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 rounded-xl cursor-pointer"
                       >
                         Cancelar
                       </button>
@@ -1577,11 +1831,9 @@ export function ProductionAndPickupView({
                           totalToProduce <= 0 ||
                           totalStrategicToConsume > custodyLeft
                         }
-                        className="px-5 py-2.5 font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl cursor-pointer"
+                        className="px-5 py-2 font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl cursor-pointer"
                       >
-                        {submitting
-                          ? 'Registrando producción...'
-                          : 'Confirmar Producción Terminada'}
+                        {submitting ? 'Guardando...' : 'Confirmar Armado'}
                       </button>
                     </div>
                   </form>

@@ -17,6 +17,10 @@ export interface UserProfile {
   role: 'OWNER' | 'ADMIN' | 'WAREHOUSE_MANAGER' | 'PRODUCTION_MANAGER' | 'OPERATOR' | 'AUDITOR';
   isActive: boolean;
   canViewPrivateCosts: boolean;
+  canReceive?: boolean;
+  canWithdraw?: boolean;
+  canProduce?: boolean;
+  canCreateProductsAndWarehouses?: boolean;
   warehousePermissions: WarehousePermission[];
 }
 

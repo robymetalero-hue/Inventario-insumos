@@ -198,24 +198,40 @@ export function CatalogAndStockView({
     (o) => o.status !== 'CLOSED' && o.status !== 'CANCELLED'
   );
 
-  // Open Ingresar Modal helper
+  const [showChangeIngresoLoc, setShowChangeIngresoLoc] = useState(false);
+  const [showChangeRetiroLoc, setShowChangeRetiroLoc] = useState(false);
+
+  // Open Ingresar Modal helper (auto-detects product's current warehouse/location)
   const openIngresarModal = (prod: Product) => {
+    const existingBals = data.balances
+      .filter((b) => b.productId === prod.id && b.quantity > 0)
+      .sort((a, b) => b.quantity - a.quantity);
+    const bestBal = existingBals[0];
+
     const whId =
-      selectedWarehouseId !== 'ALL' ? selectedWarehouseId : data.warehouses[0]?.id || 0;
-    const defaultLoc =
-      data.locations.find((l) => l.warehouseId === whId) || data.locations[0];
+      selectedWarehouseId !== 'ALL'
+        ? selectedWarehouseId
+        : bestBal?.warehouseId || data.warehouses[0]?.id || 0;
+    const locId =
+      bestBal && bestBal.warehouseId === whId
+        ? bestBal.locationId
+        : data.locations.find((l) => l.warehouseId === whId)?.id ||
+          data.locations[0]?.id ||
+          0;
+
     setIngresoProduct(prod);
     setIngresoWhId(whId);
-    setIngresoLocId(defaultLoc?.id || 0);
+    setIngresoLocId(locId);
     setIngresoQty(1000);
     setIngresoMovementType('INGRESO_PROVEEDOR');
     setIngresoSupplier('');
     setIngresoNotes('');
     setIngresoIncludeCost(false);
+    setShowChangeIngresoLoc(false);
   };
 
-  // Open Retirar Modal helper (simple & fast by default)
-  const openRetirarModal = (prod: Product, forcedOrderId?: number) => {
+  // Open Retirar Modal helper (100% pre-determined location & direct discount)
+  const openRetirarModal = (prod: Product) => {
     const prodAvailBalances = data.balances.filter(
       (b) => b.productId === prod.id && b.status === 'AVAILABLE' && b.quantity > 0
     );
@@ -246,18 +262,12 @@ export function CatalogAndStockView({
     setRetiroWhId(whId);
     setRetiroLocId(locId);
     setRetiroQty(currentAvail > 0 ? Math.min(500, currentAvail) : 100);
-
-    const prelinkedOrder = forcedOrderId || preselectedWithdrawOrderId || 0;
-    if (prelinkedOrder > 0) {
-      setRetiroMode('ORDEN_PRODUCCION');
-      setRetiroOrderId(prelinkedOrder);
-    } else {
-      setRetiroMode('CONSUMO_OPERATIVO');
-      setRetiroOrderId(0);
-    }
+    setRetiroMode('CONSUMO_OPERATIVO');
+    setRetiroOrderId(0);
     setRetiroTargetUse('');
     setRetiroReason('');
     setRetiroNotes('');
+    setShowChangeRetiroLoc(false);
   };
 
   const openCreateProductModal = () => {
@@ -2162,12 +2172,11 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL 1: INGRESAR STOCK (ULTRA-COMPACTO, RÁPIDO Y DIRECTO)            */}
+      {/* MODAL 1: INGRESAR STOCK (UBICACIÓN PREDETERMINADA + SOLO CANTIDAD)    */}
       {/* ===================================================================== */}
       {ingresoProduct && (
         <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3">
-          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200">
-            {/* Compact Header with Product & Current Stock */}
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl border border-slate-200">
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-3 min-w-0">
                 <img
@@ -2177,7 +2186,7 @@ export function CatalogAndStockView({
                 />
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                    <span className="text-[10px] font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                       INGRESO
                     </span>
                     <span className="text-xs font-mono font-bold text-slate-600 truncate">
@@ -2198,50 +2207,71 @@ export function CatalogAndStockView({
             </div>
 
             <form onSubmit={handleConfirmIngreso} className="space-y-3.5 text-xs">
-              {/* Row 1: Warehouse & Location */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Almacén *</label>
-                  <select
-                    value={ingresoWhId}
-                    onChange={(e) => {
-                      const newWh = Number(e.target.value);
-                      setIngresoWhId(newWh);
-                      const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
-                      setIngresoLocId(firstLoc?.id || 0);
-                    }}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white font-semibold"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
+              {/* Pre-determined Warehouse & Location Badge */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                      Ubicación de ingreso:
+                    </span>
+                    <span className="font-bold text-slate-800 truncate block">
+                      {data.warehouses.find((w) => w.id === ingresoWhId)?.name || 'Almacén'}
+                      {(() => {
+                        const loc = data.locations.find((l) => l.id === ingresoLocId);
+                        return loc ? ` · ${loc.zoneName} (${loc.shelfName})` : '';
+                      })()}
+                    </span>
+                  </div>
+                  {(data.warehouses.length > 1 || data.locations.length > 1) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowChangeIngresoLoc(!showChangeIngresoLoc)}
+                      className="text-[11px] font-bold text-blue-600 hover:underline shrink-0 cursor-pointer"
+                    >
+                      {showChangeIngresoLoc ? 'Listo' : 'Cambiar'}
+                    </button>
+                  )}
                 </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Subalmacén / Estante</label>
-                  <select
-                    value={ingresoLocId}
-                    onChange={(e) => setIngresoLocId(Number(e.target.value))}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white"
-                  >
-                    {data.locations
-                      .filter((l) => l.warehouseId === ingresoWhId)
-                      .map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.zoneName} · {l.shelfName}
+                {showChangeIngresoLoc && (
+                  <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-slate-200">
+                    <select
+                      value={ingresoWhId}
+                      onChange={(e) => {
+                        const newWh = Number(e.target.value);
+                        setIngresoWhId(newWh);
+                        const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
+                        setIngresoLocId(firstLoc?.id || 0);
+                      }}
+                      className="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white font-semibold"
+                    >
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
                         </option>
                       ))}
-                  </select>
-                </div>
+                    </select>
+                    <select
+                      value={ingresoLocId}
+                      onChange={(e) => setIngresoLocId(Number(e.target.value))}
+                      className="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+                    >
+                      {data.locations
+                        .filter((l) => l.warehouseId === ingresoWhId)
+                        .map((l) => (
+                          <option key={l.id} value={l.id}>
+                            {l.zoneName} · {l.shelfName}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
-              {/* Row 2: Quantity + Fast Presets */}
+              {/* Quantity + Fast Presets */}
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">Cantidad a Ingresar *</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="font-bold text-slate-800">Cantidad a Ingresar *</label>
                   <div className="flex items-center gap-1">
                     {[100, 500, 1000, 5000].map((preset) => (
                       <button
@@ -2261,16 +2291,14 @@ export function CatalogAndStockView({
                   step={1}
                   value={ingresoQty}
                   onChange={(e) => setIngresoQty(Math.max(1, Math.floor(Number(e.target.value))))}
-                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  className="w-full text-xl font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-600"
                   required
                 />
               </div>
 
-              {/* Compact 1-Line Live Balance Preview */}
+              {/* Live Calculation */}
               <div className="px-3.5 py-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between">
-                <span className="text-xs font-semibold text-emerald-900">
-                  Saldo en este almacén:
-                </span>
+                <span className="text-xs font-semibold text-emerald-950">Nuevo Saldo:</span>
                 <div className="font-mono text-sm font-bold flex items-center gap-1.5">
                   <span className="text-slate-600">{formatInt(ingresoCurrentAvail)}</span>
                   <ArrowRight className="w-3.5 h-3.5 text-emerald-600" />
@@ -2280,22 +2308,17 @@ export function CatalogAndStockView({
                 </div>
               </div>
 
-              {/* Row 3: Optional Single Note / Supplier Field */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Nota / Proveedor (Opcional)
-                </label>
-                <input
-                  type="text"
-                  value={ingresoNotes}
-                  onChange={(e) => {
-                    setIngresoNotes(e.target.value);
-                    setIngresoSupplier(e.target.value);
-                  }}
-                  placeholder="Ej. Recepción de mercadería / Lote nuevo"
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
-                />
-              </div>
+              {/* Optional 1-line note */}
+              <input
+                type="text"
+                value={ingresoNotes}
+                onChange={(e) => {
+                  setIngresoNotes(e.target.value);
+                  setIngresoSupplier(e.target.value);
+                }}
+                placeholder="Observación opcional (ej. Nuevo lote)"
+                className="w-full text-xs border border-slate-200 rounded-xl px-3 py-2"
+              />
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
@@ -2320,12 +2343,11 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL 2: RETIRAR STOCK (ULTRA-COMPACTO, RÁPIDO Y SIN COMPLEJIDAD)     */}
+      {/* MODAL 2: RETIRAR STOCK (SALIDA PREDETERMINADA + SOLO CANTIDAD)        */}
       {/* ===================================================================== */}
       {retiroProduct && (
         <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3">
-          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200">
-            {/* Compact Header with Product & Available Stock */}
+          <div className="bg-white rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl border border-slate-200">
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-3 min-w-0">
                 <img
@@ -2335,8 +2357,8 @@ export function CatalogAndStockView({
                 />
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[11px] font-mono font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
-                      RETIRO
+                    <span className="text-[10px] font-mono font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                      RETIRO DIRECTO
                     </span>
                     <span className="text-xs font-mono font-bold text-slate-600 truncate">
                       {retiroProduct.sku}
@@ -2356,50 +2378,81 @@ export function CatalogAndStockView({
             </div>
 
             <form onSubmit={handleConfirmRetiro} className="space-y-3.5 text-xs">
-              {/* Row 1: Warehouse & Location */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Almacén *</label>
-                  <select
-                    value={retiroWhId}
-                    onChange={(e) => {
-                      const newWh = Number(e.target.value);
-                      setRetiroWhId(newWh);
-                      const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
-                      setRetiroLocId(firstLoc?.id || 0);
-                    }}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white font-semibold"
-                  >
-                    {data.warehouses.map((w) => (
-                      <option key={w.id} value={w.id}>
-                        {w.name}
-                      </option>
-                    ))}
-                  </select>
+              {/* Pre-determined Origin Location Badge */}
+              <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase font-bold text-slate-400 block">
+                      Saliendo de (Predeterminado):
+                    </span>
+                    <span className="font-bold text-slate-900 truncate block">
+                      {data.warehouses.find((w) => w.id === retiroWhId)?.name || 'Almacén'}
+                      {(() => {
+                        const loc = data.locations.find((l) => l.id === retiroLocId);
+                        return loc ? ` · ${loc.zoneName} (${loc.shelfName})` : '';
+                      })()}
+                    </span>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <span className="font-mono font-extrabold text-emerald-700 text-sm block">
+                      {formatInt(retiroCurrentAvail)} u.
+                    </span>
+                    {data.balances.filter(
+                      (b) =>
+                        b.productId === retiroProduct.id &&
+                        b.status === 'AVAILABLE' &&
+                        b.quantity > 0
+                    ).length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowChangeRetiroLoc(!showChangeRetiroLoc)}
+                        className="text-[10px] font-bold text-blue-600 hover:underline cursor-pointer"
+                      >
+                        {showChangeRetiroLoc ? 'Listo' : 'Cambiar'}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Subalmacén / Estante</label>
-                  <select
-                    value={retiroLocId}
-                    onChange={(e) => setRetiroLocId(Number(e.target.value))}
-                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white"
-                  >
-                    {data.locations
-                      .filter((l) => l.warehouseId === retiroWhId)
-                      .map((l) => (
-                        <option key={l.id} value={l.id}>
-                          {l.zoneName} · {l.shelfName}
+                {showChangeRetiroLoc && (
+                  <div className="grid grid-cols-2 gap-2 mt-2.5 pt-2.5 border-t border-slate-200">
+                    <select
+                      value={retiroWhId}
+                      onChange={(e) => {
+                        const newWh = Number(e.target.value);
+                        setRetiroWhId(newWh);
+                        const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
+                        setRetiroLocId(firstLoc?.id || 0);
+                      }}
+                      className="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white font-semibold"
+                    >
+                      {data.warehouses.map((w) => (
+                        <option key={w.id} value={w.id}>
+                          {w.name}
                         </option>
                       ))}
-                  </select>
-                </div>
+                    </select>
+                    <select
+                      value={retiroLocId}
+                      onChange={(e) => setRetiroLocId(Number(e.target.value))}
+                      className="w-full text-xs border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+                    >
+                      {data.locations
+                        .filter((l) => l.warehouseId === retiroWhId)
+                        .map((l) => (
+                          <option key={l.id} value={l.id}>
+                            {l.zoneName} · {l.shelfName}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
-              {/* Row 2: Quantity + Fast Presets */}
+              {/* Quantity + Fast Presets */}
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">Cantidad a Retirar *</label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="font-bold text-slate-800">Cantidad a Retirar *</label>
                   <div className="flex items-center gap-1">
                     {[100, 500, 1000, 5000].map((preset) => (
                       <button
@@ -2417,7 +2470,7 @@ export function CatalogAndStockView({
                         onClick={() => setRetiroQty(retiroCurrentAvail)}
                         className="px-2 py-0.5 text-[11px] font-bold bg-slate-800 text-white rounded-md cursor-pointer"
                       >
-                        Máx ({formatInt(retiroCurrentAvail)})
+                        Máx
                       </button>
                     )}
                   </div>
@@ -2428,22 +2481,20 @@ export function CatalogAndStockView({
                   step={1}
                   value={retiroQty}
                   onChange={(e) => setRetiroQty(Math.max(1, Math.floor(Number(e.target.value))))}
-                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  className="w-full text-xl font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-600"
                   required
                 />
                 {retiroQty > retiroCurrentAvail && (
                   <p className="text-red-600 font-semibold mt-1 flex items-center gap-1">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                    Solo hay {formatInt(retiroCurrentAvail)} u. disponibles en esta ubicación.
+                    Solo hay {formatInt(retiroCurrentAvail)} u. disponibles.
                   </p>
                 )}
               </div>
 
-              {/* Compact 1-Line Live Balance Preview */}
+              {/* Live Balance Preview */}
               <div className="px-3.5 py-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between">
-                <span className="text-xs font-semibold text-amber-950">
-                  Disponible tras el retiro:
-                </span>
+                <span className="text-xs font-semibold text-amber-950">Quedan disponibles:</span>
                 <div className="font-mono text-sm font-bold flex items-center gap-1.5">
                   <span className="text-slate-600">{formatInt(retiroCurrentAvail)}</span>
                   <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
@@ -2457,62 +2508,17 @@ export function CatalogAndStockView({
                 </div>
               </div>
 
-              {/* Row 3: Simple Note / Reason (Optional) */}
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Nota / Para qué se retira (Opcional)
-                </label>
-                <input
-                  type="text"
-                  value={retiroReason}
-                  onChange={(e) => {
-                    setRetiroReason(e.target.value);
-                    setRetiroNotes(e.target.value);
-                  }}
-                  placeholder="Ej. Entrega a producción / Armado de lote / Despacho"
-                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
-                />
-              </div>
-
-              {/* Row 4: Optional Checkbox to link to an Open Production Order */}
-              {openOrders.length > 0 && (
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                  <label className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800">
-                    <input
-                      type="checkbox"
-                      checked={retiroMode === 'ORDEN_PRODUCCION'}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setRetiroMode('ORDEN_PRODUCCION');
-                          setRetiroOrderId(openOrders[0]?.id || 0);
-                        } else {
-                          setRetiroMode('CONSUMO_OPERATIVO');
-                          setRetiroOrderId(0);
-                        }
-                      }}
-                      className="rounded border-slate-300 text-blue-600"
-                    />
-                    <span>Vincular a una Orden de Producción (Opcional)</span>
-                  </label>
-
-                  {retiroMode === 'ORDEN_PRODUCCION' && (
-                    <select
-                      value={retiroOrderId}
-                      onChange={(e) => setRetiroOrderId(Number(e.target.value))}
-                      className="w-full text-xs border border-sky-300 rounded-lg px-2.5 py-2 bg-white font-semibold text-slate-900"
-                    >
-                      {openOrders.map((o) => {
-                        const sp = data.products.find((p) => p.id === o.strategicProductId);
-                        return (
-                          <option key={o.id} value={o.id}>
-                            {o.orderNumber} — {sp?.name} ({formatInt(o.authorizedQty)} u.)
-                          </option>
-                        );
-                      })}
-                    </select>
-                  )}
-                </div>
-              )}
+              {/* Optional 1-line Note */}
+              <input
+                type="text"
+                value={retiroReason}
+                onChange={(e) => {
+                  setRetiroReason(e.target.value);
+                  setRetiroNotes(e.target.value);
+                }}
+                placeholder="Nota opcional (ej. Salida de almacén)"
+                className="w-full text-xs border border-slate-200 rounded-xl px-3 py-2"
+              />
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
@@ -2524,16 +2530,11 @@ export function CatalogAndStockView({
                 </button>
                 <button
                   type="submit"
-                  disabled={
-                    submitting ||
-                    retiroQty <= 0 ||
-                    retiroQty > retiroCurrentAvail ||
-                    (retiroMode === 'ORDEN_PRODUCCION' && !retiroOrderId)
-                  }
+                  disabled={submitting || retiroQty <= 0 || retiroQty > retiroCurrentAvail}
                   className="px-5 py-2 font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Check className="w-4 h-4" />
-                  {submitting ? 'Procesando...' : 'Confirmar Retiro'}
+                  {submitting ? 'Retirando...' : 'Confirmar Retiro'}
                 </button>
               </div>
             </form>
