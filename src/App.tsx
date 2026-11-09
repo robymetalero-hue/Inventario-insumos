@@ -33,9 +33,9 @@ export type ActiveModule =
   | 'STOCK_CATALOG'
   | 'PRODUCTION_ORDERS'
   | 'KARDEX_REPORTS'
-  | 'CONFIGURATION';
-
-type ConfigSubSection = 'WAREHOUSES' | 'CATEGORIES' | 'PRODUCTS' | 'TRANSFERS' | 'USERS';
+  | 'WAREHOUSES_LOCATIONS'
+  | 'CATEGORIES'
+  | 'USERS_MANAGEMENT';
 
 const STORAGE_TOKEN_KEY = 'controlstock_session_token_v2';
 const STORAGE_USER_KEY = 'controlstock_session_user_v2';
@@ -67,7 +67,9 @@ export default function App() {
         'STOCK_CATALOG',
         'PRODUCTION_ORDERS',
         'KARDEX_REPORTS',
-        'CONFIGURATION',
+        'WAREHOUSES_LOCATIONS',
+        'CATEGORIES',
+        'USERS_MANAGEMENT',
       ];
       if (valid.includes(saved as ActiveModule)) {
         return saved as ActiveModule;
@@ -77,8 +79,6 @@ export default function App() {
       return 'STOCK_CATALOG';
     }
   });
-
-  const [configSubSection, setConfigSubSection] = useState<ConfigSubSection>('WAREHOUSES');
   const [productionInitialSubTab, setProductionInitialSubTab] = useState<'ORDENES' | 'RECOGIDA'>(
     'ORDENES'
   );
@@ -146,8 +146,7 @@ export default function App() {
       return;
     }
     if (target === 'WAREHOUSES_LOCATIONS') {
-      setConfigSubSection('WAREHOUSES');
-      handleSelectModule('CONFIGURATION');
+      handleSelectModule('WAREHOUSES_LOCATIONS');
       return;
     }
     handleSelectModule(target);
@@ -351,8 +350,10 @@ export default function App() {
     );
   }
 
+  const isAdmin = user.role === 'OWNER' || user.role === 'ADMIN';
+
   // ============================================================================
-  // NAVEGACIÓN SIMPLIFICADA: MÁXIMO 5 SECCIONES PRINCIPALES
+  // NAVEGACIÓN PRINCIPAL DIRECTA (CON GESTIÓN DE USUARIOS VISIBLE)
   // ============================================================================
   const navItems: {
     id: ActiveModule;
@@ -364,12 +365,12 @@ export default function App() {
     {
       id: 'SUMMARY',
       label: 'Inicio',
-      subtitle: 'Resumen y accesos rápidos',
+      subtitle: 'Resumen y estado general',
       icon: LayoutDashboard,
     },
     {
       id: 'STOCK_CATALOG',
-      label: 'Inventario',
+      label: 'Inventario y Productos',
       subtitle: 'Ingresar, retirar y existencias',
       icon: Package,
       badge: data?.products.length,
@@ -377,25 +378,42 @@ export default function App() {
     {
       id: 'PRODUCTION_ORDERS',
       label: 'Órdenes de Producción',
-      subtitle: 'Entrega UDP, producción y recogida',
+      subtitle: 'Entrega UDP, lotes y recogida',
       icon: Factory,
       badge: data?.productionOrders.length,
     },
     {
       id: 'KARDEX_REPORTS',
       label: 'Historial y Kardex',
-      subtitle: 'Movimientos y saldos auditables',
+      subtitle: 'Entradas, salidas y saldos',
       icon: History,
     },
     {
-      id: 'CONFIGURATION',
-      label: 'Configuración',
-      subtitle: 'Almacenes, subalmacenes y dptos.',
-      icon: Settings,
+      id: 'WAREHOUSES_LOCATIONS',
+      label: 'Almacenes y Subalmacenes',
+      subtitle: 'Sucursales, cuartos y estantes',
+      icon: Building2,
+      badge: data?.warehouses.length,
     },
+    {
+      id: 'CATEGORIES',
+      label: 'Departamentos',
+      subtitle: 'Categorías de productos',
+      icon: Tags,
+      badge: data?.categories.length,
+    },
+    ...(isAdmin
+      ? [
+          {
+            id: 'USERS_MANAGEMENT' as ActiveModule,
+            label: 'Usuarios y Permisos',
+            subtitle: 'Personal, entradas y salidas',
+            icon: Users,
+            badge: data?.usersPublic.length,
+          },
+        ]
+      : []),
   ];
-
-  const isAdmin = user.role === 'OWNER' || user.role === 'ADMIN';
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col lg:flex-row">
@@ -589,12 +607,23 @@ export default function App() {
           </div>
         ) : (
           <div className="space-y-6">
-            {/* 1. INICIO (SUMMARY) & 2. INVENTARIO (STOCK_CATALOG) */}
-            {(activeModule === 'SUMMARY' || activeModule === 'STOCK_CATALOG') && (
+            {/* 1. INICIO, 2. INVENTARIO, 5. ALMACENES, 6. DEPARTAMENTOS */}
+            {(activeModule === 'SUMMARY' ||
+              activeModule === 'STOCK_CATALOG' ||
+              activeModule === 'WAREHOUSES_LOCATIONS' ||
+              activeModule === 'CATEGORIES') && (
               <CatalogAndStockView
                 data={data}
                 isOnline={isOnline}
-                initialSubView={activeModule === 'SUMMARY' ? 'SUMMARY' : 'PRODUCTS'}
+                initialSubView={
+                  activeModule === 'SUMMARY'
+                    ? 'SUMMARY'
+                    : activeModule === 'WAREHOUSES_LOCATIONS'
+                    ? 'WAREHOUSES'
+                    : activeModule === 'CATEGORIES'
+                    ? 'CATEGORIES'
+                    : 'PRODUCTS'
+                }
                 preselectedWithdrawOrderId={preselectedWithdrawOrderId}
                 onClearPreselectedOrder={() => setPreselectedWithdrawOrderId(null)}
                 onNavigateToModule={handleChildNavigate}
@@ -639,113 +668,15 @@ export default function App() {
               />
             )}
 
-            {/* 5. CONFIGURACIÓN UNIFICADA (ALMACENES, SUBALMACENES, DEPARTAMENTOS, PRODUCTOS, USUARIOS) */}
-            {activeModule === 'CONFIGURATION' && (
-              <div className="space-y-5">
-                <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
-                      <Settings className="w-5 h-5 text-blue-600" />
-                      Configuración de Almacenes, Subalmacenes, Departamentos y Productos
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                      Crea y administra almacenes, subalmacenes (secciones/estantes), departamentos, productos y usuarios en un solo lugar.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setConfigSubSection('WAREHOUSES')}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                        configSubSection === 'WAREHOUSES'
-                          ? 'bg-slate-900 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      <Building2 className="w-3.5 h-3.5" />
-                      Almacenes y Subalmacenes ({data.warehouses.length})
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfigSubSection('CATEGORIES')}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                        configSubSection === 'CATEGORIES'
-                          ? 'bg-slate-900 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      <Tags className="w-3.5 h-3.5" />
-                      Departamentos ({data.categories.length})
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfigSubSection('PRODUCTS')}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                        configSubSection === 'PRODUCTS'
-                          ? 'bg-slate-900 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      <Package className="w-3.5 h-3.5" />
-                      Productos ({data.products.length})
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => setConfigSubSection('TRANSFERS')}
-                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                        configSubSection === 'TRANSFERS'
-                          ? 'bg-slate-900 text-white'
-                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                      }`}
-                    >
-                      <ArrowLeftRight className="w-3.5 h-3.5" />
-                      Traslados y Conteos
-                    </button>
-
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={() => setConfigSubSection('USERS')}
-                        className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-colors ${
-                          configSubSection === 'USERS'
-                            ? 'bg-slate-900 text-white'
-                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                        }`}
-                      >
-                        <Users className="w-3.5 h-3.5" />
-                        Usuarios y Permisos ({data.usersPublic.length})
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {(configSubSection === 'WAREHOUSES' ||
-                  configSubSection === 'CATEGORIES' ||
-                  configSubSection === 'PRODUCTS') && (
-                  <CatalogAndStockView
-                    data={data}
-                    isOnline={isOnline}
-                    initialSubView={configSubSection}
-                    onNavigateToModule={handleChildNavigate}
-                    apiFetch={apiFetch}
-                    onRefresh={() => fetchWorkspace()}
-                  />
-                )}
-
-                {(configSubSection === 'TRANSFERS' || configSubSection === 'USERS') && (
-                  <OperationsAuditAndPrivateView
-                    data={data}
-                    isOnline={isOnline}
-                    initialSubView={configSubSection === 'TRANSFERS' ? 'TRANSFERS' : 'USERS'}
-                    apiFetch={apiFetch}
-                    onRefresh={() => fetchWorkspace()}
-                  />
-                )}
-              </div>
+            {/* 7. GESTIÓN DE USUARIOS Y PERMISOS */}
+            {activeModule === 'USERS_MANAGEMENT' && (
+              <OperationsAuditAndPrivateView
+                data={data}
+                isOnline={isOnline}
+                initialSubView="USERS"
+                apiFetch={apiFetch}
+                onRefresh={() => fetchWorkspace()}
+              />
             )}
           </div>
         )}

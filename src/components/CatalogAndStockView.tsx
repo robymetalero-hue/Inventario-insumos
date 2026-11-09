@@ -186,10 +186,12 @@ export function CatalogAndStockView({
   const [deletingWarehouse, setDeletingWarehouse] = useState<boolean>(false);
 
   const isAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
-  const canAuthorizeSpecialWithdrawal =
-    data.user.role === 'OWNER' ||
-    data.user.role === 'ADMIN' ||
-    data.user.role === 'WAREHOUSE_MANAGER';
+  const canCreateCatalog =
+    isAdmin || data.user.warehousePermissions.some((p) => p.canApproveAdjustments);
+  const canReceive =
+    isAdmin || data.user.warehousePermissions.some((p) => p.canReceive);
+  const canDispatch =
+    isAdmin || data.user.warehousePermissions.some((p) => p.canDispatch);
   const canViewCosts = data.user.role === 'OWNER' || data.user.canViewPrivateCosts;
 
   const openOrders = data.productionOrders.filter(
@@ -212,9 +214,8 @@ export function CatalogAndStockView({
     setIngresoIncludeCost(false);
   };
 
-  // Open Retirar Modal helper
+  // Open Retirar Modal helper (simple & fast by default)
   const openRetirarModal = (prod: Product, forcedOrderId?: number) => {
-    // Pick the warehouse where this product currently has the highest AVAILABLE stock
     const prodAvailBalances = data.balances.filter(
       (b) => b.productId === prod.id && b.status === 'AVAILABLE' && b.quantity > 0
     );
@@ -246,15 +247,12 @@ export function CatalogAndStockView({
     setRetiroLocId(locId);
     setRetiroQty(currentAvail > 0 ? Math.min(500, currentAvail) : 100);
 
-    const activeOrderId = forcedOrderId || preselectedWithdrawOrderId || openOrders[0]?.id || 0;
-    if (activeOrderId > 0) {
+    const prelinkedOrder = forcedOrderId || preselectedWithdrawOrderId || 0;
+    if (prelinkedOrder > 0) {
       setRetiroMode('ORDEN_PRODUCCION');
-      setRetiroOrderId(activeOrderId);
-    } else if (canAuthorizeSpecialWithdrawal) {
-      setRetiroMode('CONSUMO_OPERATIVO');
-      setRetiroOrderId(0);
+      setRetiroOrderId(prelinkedOrder);
     } else {
-      setRetiroMode('ORDEN_PRODUCCION');
+      setRetiroMode('CONSUMO_OPERATIVO');
       setRetiroOrderId(0);
     }
     setRetiroTargetUse('');
@@ -532,6 +530,13 @@ export function CatalogAndStockView({
     setFeedback(null);
     try {
       const selectedOrder = data.productionOrders.find((o) => o.id === retiroOrderId);
+      const effectiveReason =
+        retiroReason.trim() ||
+        retiroNotes.trim() ||
+        (retiroMode === 'ORDEN_PRODUCCION'
+          ? `Insumo retirado para Orden ${selectedOrder?.orderNumber || ''}`
+          : `Retiro de ${retiroProduct.name}`);
+
       const res = await apiFetch('/api/inventory/withdrawals', {
         method: 'POST',
         body: JSON.stringify({
@@ -545,16 +550,10 @@ export function CatalogAndStockView({
           toWarehouseId: retiroMode === 'TRANSFERENCIA_ALMACEN' ? retiroDestWhId : undefined,
           toLocationId: retiroMode === 'TRANSFERENCIA_ALMACEN' ? destLoc.id : undefined,
           recipientOrTarget:
-            retiroTargetUse ||
-            (selectedOrder ? `Orden ${selectedOrder.orderNumber}` : 'Uso Autorizado'),
-          reason:
-            retiroReason ||
-            (retiroMode === 'ORDEN_PRODUCCION'
-              ? `Insumo retirado para Orden ${selectedOrder?.orderNumber || ''}`
-              : retiroMode === 'TRANSFERENCIA_ALMACEN'
-              ? 'Transferencia a otro almacén'
-              : 'Retiro autorizado de inventario'),
-          notes: retiroNotes,
+            retiroTargetUse.trim() ||
+            (selectedOrder ? `Orden ${selectedOrder.orderNumber}` : data.user.fullName),
+          reason: effectiveReason,
+          notes: retiroNotes.trim() || effectiveReason,
         }),
       });
 
@@ -1331,7 +1330,7 @@ export function CatalogAndStockView({
                 </button>
               </div>
 
-              {isAdmin && (
+              {canCreateCatalog && (
                 <>
                   <motion.button
                     whileTap={{ scale: 0.97 }}
@@ -1340,7 +1339,7 @@ export function CatalogAndStockView({
                     className="px-3.5 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Building2 className="w-4 h-4 text-slate-600" />
-                    Almacenes / Subalmacenes ({data.warehouses.length})
+                    Almacenes ({data.warehouses.length})
                   </motion.button>
 
                   <motion.button
@@ -1422,7 +1421,7 @@ export function CatalogAndStockView({
                     : 'Prueba cambiando el término de búsqueda o seleccionando otra categoría o almacén.'}
                 </p>
               </div>
-              {isAdmin && (
+              {canCreateCatalog && (
                 <div className="flex items-center justify-center gap-3 pt-2">
                   <button
                     type="button"
@@ -1614,8 +1613,9 @@ export function CatalogAndStockView({
                           <motion.button
                             whileTap={{ scale: 0.96 }}
                             type="button"
+                            disabled={!canReceive}
                             onClick={() => openIngresarModal(product)}
-                            className="py-2.5 px-3 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                            className="py-2.5 px-3 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
                           >
                             <ArrowDownToLine className="w-4 h-4 shrink-0" />
                             <span>Ingresar</span>
@@ -1624,15 +1624,16 @@ export function CatalogAndStockView({
                           <motion.button
                             whileTap={{ scale: 0.96 }}
                             type="button"
+                            disabled={!canDispatch}
                             onClick={() => openRetirarModal(product)}
-                            className="py-2.5 px-3 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                            className="py-2.5 px-3 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-40 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
                           >
                             <ArrowUpFromLine className="w-4 h-4 shrink-0" />
                             <span>Retirar</span>
                           </motion.button>
                         </div>
 
-                        {/* Secondary Action Row: Ver detalle, Ver historial, Editar, Eliminar */}
+                        {/* Secondary Action Row: Ver detalle, Ver historial, Editar (canCreateCatalog), Eliminar (Solo Admin) */}
                         <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-slate-200/60">
                           <div className="flex items-center gap-1.5">
                             <button
@@ -1659,8 +1660,8 @@ export function CatalogAndStockView({
                             )}
                           </div>
 
-                          {isAdmin && (
-                            <div className="flex items-center gap-1">
+                          <div className="flex items-center gap-1">
+                            {canCreateCatalog && (
                               <button
                                 type="button"
                                 onClick={() => openEditProductModal(product)}
@@ -1669,16 +1670,18 @@ export function CatalogAndStockView({
                               >
                                 <Edit3 className="w-3.5 h-3.5" />
                               </button>
+                            )}
+                            {isAdmin && (
                               <button
                                 type="button"
                                 onClick={() => setDeleteConfirmProduct(product)}
                                 className="p-1.5 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-lg cursor-pointer"
-                                title="Eliminar producto"
+                                title="Eliminar producto (Solo Administrador)"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
-                            </div>
-                          )}
+                            )}
+                          </div>
                         </div>
                       </div>
                     </motion.div>
@@ -1836,7 +1839,7 @@ export function CatalogAndStockView({
               >
                 ← Volver a Productos
               </button>
-              {isAdmin && (
+              {canCreateCatalog && (
                 <button
                   type="button"
                   onClick={openCreateCategoryModal}
@@ -1867,7 +1870,7 @@ export function CatalogAndStockView({
                   Memorias microSD, Producto Terminado).
                 </p>
               </div>
-              {isAdmin && (
+              {canCreateCatalog && (
                 <button
                   type="button"
                   onClick={openCreateCategoryModal}
@@ -1914,24 +1917,28 @@ export function CatalogAndStockView({
                         )}
                       </div>
 
-                      {isAdmin && (
+                      {(canCreateCatalog || isAdmin) && (
                         <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openEditCategoryModal(cat)}
-                            className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1 cursor-pointer"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                            Editar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteCategory(cat)}
-                            className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg flex items-center gap-1 cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Eliminar
-                          </button>
+                          {canCreateCatalog && (
+                            <button
+                              type="button"
+                              onClick={() => openEditCategoryModal(cat)}
+                              className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1 cursor-pointer"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              Editar
+                            </button>
+                          )}
+                          {isAdmin && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteCategory(cat)}
+                              className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg flex items-center gap-1 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              Eliminar
+                            </button>
+                          )}
                         </div>
                       )}
                     </motion.div>
@@ -1967,7 +1974,7 @@ export function CatalogAndStockView({
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {isAdmin && (
+            {canCreateCatalog && (
               <form
                 onSubmit={handleCreateWarehouse}
                 className="bg-white rounded-xl border border-slate-200 p-6 space-y-4"
@@ -2017,7 +2024,7 @@ export function CatalogAndStockView({
               </form>
             )}
 
-            {isAdmin && (
+            {canCreateCatalog && (
               <form
                 onSubmit={handleCreateLocation}
                 className="bg-white rounded-xl border border-slate-200 p-6 space-y-4"
@@ -2155,57 +2162,46 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL 1: INGRESAR STOCK (CON VISTA PREVIA ANTES/DESPUÉS Y COMPROBANTE)*/}
+      {/* MODAL 1: INGRESAR STOCK (ULTRA-COMPACTO, RÁPIDO Y DIRECTO)            */}
       {/* ===================================================================== */}
       {ingresoProduct && (
-        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                  <ArrowDownToLine className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    Ingresar Stock al Almacén
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200">
+            {/* Compact Header with Product & Current Stock */}
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <img
+                  src={ingresoProduct.imageUrl}
+                  alt={ingresoProduct.name}
+                  className="w-11 h-11 rounded-xl object-cover border border-slate-200 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      INGRESO
+                    </span>
+                    <span className="text-xs font-mono font-bold text-slate-600 truncate">
+                      {ingresoProduct.sku}
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-900 truncate mt-0.5">
+                    {ingresoProduct.name}
                   </h3>
-                  <p className="text-xs text-slate-500">
-                    Aumenta el saldo disponible con registro auditable y folio único
-                  </p>
                 </div>
               </div>
               <button
                 onClick={() => setIngresoProduct(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Product Mini Card */}
-            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center gap-3.5">
-              <img
-                src={ingresoProduct.imageUrl}
-                alt={ingresoProduct.name}
-                className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
-              />
-              <div className="min-w-0 flex-1">
-                <span className="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                  {ingresoProduct.sku}
-                </span>
-                <h4 className="text-sm font-bold text-slate-900 truncate mt-1">
-                  {ingresoProduct.name}
-                </h4>
-                <div className="text-xs text-slate-500">{ingresoProduct.family}</div>
-              </div>
-            </div>
-
-            <form onSubmit={handleConfirmIngreso} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <form onSubmit={handleConfirmIngreso} className="space-y-3.5 text-xs">
+              {/* Row 1: Warehouse & Location */}
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Almacén Destino *
-                  </label>
+                  <label className="block font-bold text-slate-700 mb-1">Almacén *</label>
                   <select
                     value={ingresoWhId}
                     onChange={(e) => {
@@ -2214,7 +2210,7 @@ export function CatalogAndStockView({
                       const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
                       setIngresoLocId(firstLoc?.id || 0);
                     }}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
+                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white font-semibold"
                   >
                     {data.warehouses.map((w) => (
                       <option key={w.id} value={w.id}>
@@ -2225,13 +2221,11 @@ export function CatalogAndStockView({
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Ubicación / Estante *
-                  </label>
+                  <label className="block font-bold text-slate-700 mb-1">Subalmacén / Estante</label>
                   <select
                     value={ingresoLocId}
                     onChange={(e) => setIngresoLocId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white"
+                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white"
                   >
                     {data.locations
                       .filter((l) => l.warehouseId === ingresoWhId)
@@ -2244,13 +2238,12 @@ export function CatalogAndStockView({
                 </div>
               </div>
 
+              {/* Row 2: Quantity + Fast Presets */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">
-                    Cantidad a Ingresar (Unidades enteras) *
-                  </label>
+                  <label className="font-bold text-slate-700">Cantidad a Ingresar *</label>
                   <div className="flex items-center gap-1">
-                    {[100, 500, 1000, 5000, 20000].map((preset) => (
+                    {[100, 500, 1000, 5000].map((preset) => (
                       <button
                         key={preset}
                         type="button"
@@ -2268,94 +2261,57 @@ export function CatalogAndStockView({
                   step={1}
                   value={ingresoQty}
                   onChange={(e) => setIngresoQty(Math.max(1, Math.floor(Number(e.target.value))))}
-                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-600"
                   required
                 />
               </div>
 
+              {/* Compact 1-Line Live Balance Preview */}
+              <div className="px-3.5 py-2.5 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center justify-between">
+                <span className="text-xs font-semibold text-emerald-900">
+                  Saldo en este almacén:
+                </span>
+                <div className="font-mono text-sm font-bold flex items-center gap-1.5">
+                  <span className="text-slate-600">{formatInt(ingresoCurrentAvail)}</span>
+                  <ArrowRight className="w-3.5 h-3.5 text-emerald-600" />
+                  <span className="text-emerald-800 font-extrabold">
+                    {formatInt(ingresoCurrentAvail + (ingresoQty > 0 ? ingresoQty : 0))} u.
+                  </span>
+                </div>
+              </div>
+
+              {/* Row 3: Optional Single Note / Supplier Field */}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Motivo del Ingreso *</label>
-                <select
-                  value={ingresoMovementType}
-                  onChange={(e) => setIngresoMovementType(e.target.value as any)}
-                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-medium"
-                >
-                  <option value="INGRESO_PROVEEDOR">Recepción de mercancía / proveedor</option>
-                  <option value="DEVOLUCION_INSUMOS">
-                    Devolución de insumos no utilizados
-                  </option>
-                  {isAdmin && (
-                    <option value="REGULARIZACION_AUTORIZADA">
-                      Regularización autorizada de inventario
-                    </option>
-                  )}
-                </select>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Nota / Proveedor (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={ingresoNotes}
+                  onChange={(e) => {
+                    setIngresoNotes(e.target.value);
+                    setIngresoSupplier(e.target.value);
+                  }}
+                  placeholder="Ej. Recepción de mercadería / Lote nuevo"
+                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                />
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Proveedor / Contenedor / Ref.
-                  </label>
-                  <input
-                    type="text"
-                    value={ingresoSupplier}
-                    onChange={(e) => setIngresoSupplier(e.target.value)}
-                    placeholder="Ej. Contenedor #402 / Guía"
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Notas / Observaciones
-                  </label>
-                  <input
-                    type="text"
-                    value={ingresoNotes}
-                    onChange={(e) => setIngresoNotes(e.target.value)}
-                    placeholder="Detalle adicional opcional"
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
-                  />
-                </div>
-              </div>
-
-              {/* Live Mathematical Preview Box */}
-              <div className="p-3.5 bg-emerald-50/80 border border-emerald-200 rounded-xl grid grid-cols-3 gap-2 text-center">
-                <div>
-                  <div className="text-[11px] font-medium text-emerald-900">Saldo Anterior</div>
-                  <div className="text-base font-mono font-bold text-slate-800">
-                    {formatInt(ingresoCurrentAvail)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] font-medium text-emerald-900">Ingreso</div>
-                  <div className="text-base font-mono font-bold text-emerald-700">
-                    +{formatInt(ingresoQty > 0 ? ingresoQty : 0)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] font-bold text-emerald-950">Saldo Resultante</div>
-                  <div className="text-base font-mono font-extrabold text-emerald-800">
-                    {formatInt(ingresoCurrentAvail + (ingresoQty > 0 ? ingresoQty : 0))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIngresoProduct(null)}
-                  className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
                   disabled={submitting || ingresoQty <= 0}
-                  className="px-5 py-2.5 font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  className="px-5 py-2 font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Check className="w-4 h-4" />
-                  {submitting ? 'Registrando...' : 'Confirmar Ingreso'}
+                  {submitting ? 'Guardando...' : 'Confirmar Ingreso'}
                 </button>
               </div>
             </form>
@@ -2364,67 +2320,46 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL 2: RETIRAR STOCK (VINCULADO A ORDEN OP / USO / TRANSFERENCIA)   */}
+      {/* MODAL 2: RETIRAR STOCK (ULTRA-COMPACTO, RÁPIDO Y SIN COMPLEJIDAD)     */}
       {/* ===================================================================== */}
       {retiroProduct && (
-        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
-                  <ArrowUpFromLine className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-slate-900">
-                    Retirar Producto / Insumos de Almacén
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl border border-slate-200">
+            {/* Compact Header with Product & Available Stock */}
+            <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <img
+                  src={retiroProduct.imageUrl}
+                  alt={retiroProduct.name}
+                  className="w-11 h-11 rounded-xl object-cover border border-slate-200 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-mono font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                      RETIRO
+                    </span>
+                    <span className="text-xs font-mono font-bold text-slate-600 truncate">
+                      {retiroProduct.sku}
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-slate-900 truncate mt-0.5">
+                    {retiroProduct.name}
                   </h3>
-                  <p className="text-xs text-slate-500">
-                    Descuenta inmediatamente del stock disponible con trazabilidad completa
-                  </p>
                 </div>
               </div>
               <button
                 onClick={() => setRetiroProduct(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Product Mini Card */}
-            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3.5">
-              <div className="flex items-center gap-3 min-w-0">
-                <img
-                  src={retiroProduct.imageUrl}
-                  alt={retiroProduct.name}
-                  className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
-                />
-                <div className="min-w-0">
-                  <span className="text-xs font-mono font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
-                    {retiroProduct.sku}
-                  </span>
-                  <h4 className="text-sm font-bold text-slate-900 truncate mt-1">
-                    {retiroProduct.name}
-                  </h4>
-                  <div className="text-xs text-slate-500">{retiroProduct.family}</div>
-                </div>
-              </div>
-              <div className="text-right shrink-0">
-                <div className="text-[10px] font-bold uppercase text-slate-500">
-                  Disponible Actual
-                </div>
-                <div className="text-lg font-mono font-extrabold text-emerald-700">
-                  {formatInt(retiroCurrentAvail)} u.
-                </div>
-              </div>
-            </div>
-
-            <form onSubmit={handleConfirmRetiro} className="space-y-4 text-xs">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <form onSubmit={handleConfirmRetiro} className="space-y-3.5 text-xs">
+              {/* Row 1: Warehouse & Location */}
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Retirar desde Almacén *
-                  </label>
+                  <label className="block font-bold text-slate-700 mb-1">Almacén *</label>
                   <select
                     value={retiroWhId}
                     onChange={(e) => {
@@ -2433,7 +2368,7 @@ export function CatalogAndStockView({
                       const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
                       setRetiroLocId(firstLoc?.id || 0);
                     }}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
+                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white font-semibold"
                   >
                     {data.warehouses.map((w) => (
                       <option key={w.id} value={w.id}>
@@ -2444,13 +2379,11 @@ export function CatalogAndStockView({
                 </div>
 
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">
-                    Ubicación / Estante *
-                  </label>
+                  <label className="block font-bold text-slate-700 mb-1">Subalmacén / Estante</label>
                   <select
                     value={retiroLocId}
                     onChange={(e) => setRetiroLocId(Number(e.target.value))}
-                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white"
+                    className="w-full text-xs border border-slate-300 rounded-xl px-2.5 py-2 bg-white"
                   >
                     {data.locations
                       .filter((l) => l.warehouseId === retiroWhId)
@@ -2463,12 +2396,10 @@ export function CatalogAndStockView({
                 </div>
               </div>
 
-              {/* Quantity & Fast Presets */}
+              {/* Row 2: Quantity + Fast Presets */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-slate-700">
-                    Cantidad a Retirar (Unidades enteras) *
-                  </label>
+                  <label className="font-bold text-slate-700">Cantidad a Retirar *</label>
                   <div className="flex items-center gap-1">
                     {[100, 500, 1000, 5000].map((preset) => (
                       <button
@@ -2497,248 +2428,97 @@ export function CatalogAndStockView({
                   step={1}
                   value={retiroQty}
                   onChange={(e) => setRetiroQty(Math.max(1, Math.floor(Number(e.target.value))))}
-                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-600"
                   required
                 />
                 {retiroQty > retiroCurrentAvail && (
                   <p className="text-red-600 font-semibold mt-1 flex items-center gap-1">
                     <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                    No puedes retirar {formatInt(retiroQty)} u. porque solo hay{' '}
-                    {formatInt(retiroCurrentAvail)} u. disponibles en este estante.
+                    Solo hay {formatInt(retiroCurrentAvail)} u. disponibles en esta ubicación.
                   </p>
                 )}
               </div>
 
-              {/* Motivo / Destino del Retiro */}
-              <div className="space-y-2">
-                <label className="block font-bold text-slate-700">
-                  Motivo / Destino del Retiro *
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRetiroMode('ORDEN_PRODUCCION')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      retiroMode === 'ORDEN_PRODUCCION'
-                        ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
-                        : 'bg-white border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="font-bold text-slate-900">
-                      A) Para una Orden de Producción
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      Retiro de empaques, cases o adaptadores para armar lote
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setRetiroMode('TRANSFERENCIA_ALMACEN')}
-                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                      retiroMode === 'TRANSFERENCIA_ALMACEN'
-                        ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
-                        : 'bg-white border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="font-bold text-slate-900">
-                      C) Transferencia a otro almacén
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      Envío auditado hacia otra sucursal o taller
-                    </div>
-                  </button>
-
-                  {canAuthorizeSpecialWithdrawal && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => setRetiroMode('CONSUMO_OPERATIVO')}
-                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                          retiroMode === 'CONSUMO_OPERATIVO'
-                            ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
-                            : 'bg-white border-slate-200 hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="font-bold text-slate-900">
-                          B) Consumo operativo / otro uso
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">
-                          Salida autorizada con responsable y motivo
-                        </div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setRetiroMode('MERMA_DANO')}
-                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
-                          retiroMode === 'MERMA_DANO'
-                            ? 'bg-red-50 border-red-500 ring-2 ring-red-500/20'
-                            : 'bg-white border-slate-200 hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="font-bold text-red-900">D) Merma / daño físico</div>
-                        <div className="text-[11px] text-slate-500 mt-0.5">
-                          Baja auditada por material defectuoso o roto
-                        </div>
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Conditional Fields by Retiro Mode */}
-              {retiroMode === 'ORDEN_PRODUCCION' && (
-                <div className="p-3.5 bg-sky-50/70 border border-sky-200 rounded-xl space-y-3">
-                  <div>
-                    <label className="block font-bold text-sky-950 mb-1">
-                      Orden de Producción Asociada *
-                    </label>
-                    {openOrders.length === 0 ? (
-                      <div className="p-2.5 bg-white border border-amber-300 rounded-lg text-amber-800 font-medium">
-                        No hay órdenes de producción abiertas. Primero crea una en "Órdenes de
-                        Producción" o elige otro motivo si tienes autorización.
-                      </div>
-                    ) : (
-                      <select
-                        value={retiroOrderId}
-                        onChange={(e) => setRetiroOrderId(Number(e.target.value))}
-                        className="w-full text-sm border border-sky-300 rounded-xl px-3 py-2 bg-white font-semibold text-slate-900"
-                        required
-                      >
-                        <option value={0}>Seleccionar Orden de Producción...</option>
-                        {openOrders.map((o) => {
-                          const sp = data.products.find((p) => p.id === o.strategicProductId);
-                          return (
-                            <option key={o.id} value={o.id}>
-                              {o.orderNumber} — {sp?.name} ({formatInt(o.authorizedQty)} u.)
-                            </option>
-                          );
-                        })}
-                      </select>
-                    )}
-                  </div>
-                  <div>
-                    <label className="block font-bold text-sky-950 mb-1">
-                      Producto / Modelo a armar o justificación *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={retiroTargetUse}
-                      onChange={(e) => setRetiroTargetUse(e.target.value)}
-                      placeholder="Ej. Para armar 1,000 USB HP 8 GB y 1,500 Sony 8 GB"
-                      className="w-full text-sm border border-sky-300 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                  <p className="text-[11px] text-sky-800 leading-relaxed">
-                    <strong>Regla sin doble descuento:</strong> Este insumo se descontará ahora
-                    mismo del estante y quedará vinculado a la orden seleccionada. Al registrar los
-                    productos terminados, no se volverá a descontar.
-                  </p>
-                </div>
-              )}
-
-              {retiroMode === 'TRANSFERENCIA_ALMACEN' && (
-                <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
-                  <div>
-                    <label className="block font-bold text-blue-950 mb-1">
-                      Almacén Destino *
-                    </label>
-                    <select
-                      value={retiroDestWhId}
-                      onChange={(e) => setRetiroDestWhId(Number(e.target.value))}
-                      className="w-full text-sm border border-blue-300 rounded-xl px-3 py-2 bg-white font-semibold"
-                    >
-                      {data.allWarehousesSummary
-                        .filter((w) => w.id !== retiroWhId)
-                        .map((w) => (
-                          <option key={w.id} value={w.id}>
-                            {w.name}
-                          </option>
-                        ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block font-bold text-blue-950 mb-1">
-                      Motivo / Referencia de envío *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={retiroReason}
-                      onChange={(e) => setRetiroReason(e.target.value)}
-                      placeholder="Ej. Abastecimiento de empaques a taller"
-                      className="w-full text-sm border border-blue-300 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {(retiroMode === 'CONSUMO_OPERATIVO' || retiroMode === 'MERMA_DANO') && (
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
-                  <div>
-                    <label className="block font-bold text-slate-800 mb-1">
-                      Destinatario / Responsable *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={retiroTargetUse}
-                      onChange={(e) => setRetiroTargetUse(e.target.value)}
-                      placeholder="Nombre del receptor o área"
-                      className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-bold text-slate-800 mb-1">
-                      Justificación obligatoria *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={retiroReason}
-                      onChange={(e) => setRetiroReason(e.target.value)}
-                      placeholder="Describa el motivo exacto del retiro"
-                      className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Live Mathematical Preview Box */}
-              <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-xl grid grid-cols-3 gap-2 text-center">
-                <div>
-                  <div className="text-[11px] font-medium text-amber-900">
-                    Disponible Anterior
-                  </div>
-                  <div className="text-base font-mono font-bold text-slate-800">
-                    {formatInt(retiroCurrentAvail)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] font-medium text-amber-900">Cantidad a Retirar</div>
-                  <div className="text-base font-mono font-bold text-amber-700">
-                    -{formatInt(retiroQty > 0 ? retiroQty : 0)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[11px] font-bold text-amber-950">Disponible Restante</div>
-                  <div
-                    className={`text-base font-mono font-extrabold ${
+              {/* Compact 1-Line Live Balance Preview */}
+              <div className="px-3.5 py-2.5 bg-amber-50 border border-amber-200 rounded-xl flex items-center justify-between">
+                <span className="text-xs font-semibold text-amber-950">
+                  Disponible tras el retiro:
+                </span>
+                <div className="font-mono text-sm font-bold flex items-center gap-1.5">
+                  <span className="text-slate-600">{formatInt(retiroCurrentAvail)}</span>
+                  <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                  <span
+                    className={`font-extrabold ${
                       retiroCurrentAvail - retiroQty < 0 ? 'text-red-600' : 'text-emerald-800'
                     }`}
                   >
-                    {formatInt(retiroCurrentAvail - (retiroQty > 0 ? retiroQty : 0))}
-                  </div>
+                    {formatInt(retiroCurrentAvail - (retiroQty > 0 ? retiroQty : 0))} u.
+                  </span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+              {/* Row 3: Simple Note / Reason (Optional) */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Nota / Para qué se retira (Opcional)
+                </label>
+                <input
+                  type="text"
+                  value={retiroReason}
+                  onChange={(e) => {
+                    setRetiroReason(e.target.value);
+                    setRetiroNotes(e.target.value);
+                  }}
+                  placeholder="Ej. Entrega a producción / Armado de lote / Despacho"
+                  className="w-full text-xs border border-slate-300 rounded-xl px-3 py-2"
+                />
+              </div>
+
+              {/* Row 4: Optional Checkbox to link to an Open Production Order */}
+              {openOrders.length > 0 && (
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer font-semibold text-slate-800">
+                    <input
+                      type="checkbox"
+                      checked={retiroMode === 'ORDEN_PRODUCCION'}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setRetiroMode('ORDEN_PRODUCCION');
+                          setRetiroOrderId(openOrders[0]?.id || 0);
+                        } else {
+                          setRetiroMode('CONSUMO_OPERATIVO');
+                          setRetiroOrderId(0);
+                        }
+                      }}
+                      className="rounded border-slate-300 text-blue-600"
+                    />
+                    <span>Vincular a una Orden de Producción (Opcional)</span>
+                  </label>
+
+                  {retiroMode === 'ORDEN_PRODUCCION' && (
+                    <select
+                      value={retiroOrderId}
+                      onChange={(e) => setRetiroOrderId(Number(e.target.value))}
+                      className="w-full text-xs border border-sky-300 rounded-lg px-2.5 py-2 bg-white font-semibold text-slate-900"
+                    >
+                      {openOrders.map((o) => {
+                        const sp = data.products.find((p) => p.id === o.strategicProductId);
+                        return (
+                          <option key={o.id} value={o.id}>
+                            {o.orderNumber} — {sp?.name} ({formatInt(o.authorizedQty)} u.)
+                          </option>
+                        );
+                      })}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setRetiroProduct(null)}
-                  className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
                 >
                   Cancelar
                 </button>
@@ -2750,10 +2530,10 @@ export function CatalogAndStockView({
                     retiroQty > retiroCurrentAvail ||
                     (retiroMode === 'ORDEN_PRODUCCION' && !retiroOrderId)
                   }
-                  className="px-5 py-2.5 font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm"
+                  className="px-5 py-2 font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Check className="w-4 h-4" />
-                  {submitting ? 'Procesando retiro...' : 'Confirmar Retiro'}
+                  {submitting ? 'Procesando...' : 'Confirmar Retiro'}
                 </button>
               </div>
             </form>

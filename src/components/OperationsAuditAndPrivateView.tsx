@@ -80,13 +80,18 @@ export function OperationsAuditAndPrivateView({
   const [cntReason, setCntReason] = useState('Recuento físico de control');
   const [submittingCnt, setSubmittingCnt] = useState(false);
 
-  // User Management State
+  // User Management State (Create & Edit with Granular Permissions)
   const [showUserModal, setShowUserModal] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<number | null>(null);
   const [uUsername, setUUsername] = useState('');
   const [uPassword, setUPassword] = useState('');
   const [uFullName, setUFullName] = useState('');
-  const [uRole, setURole] = useState<string>('WAREHOUSE_MANAGER');
-  const [uWarehouseId, setUWarehouseId] = useState<string>('');
+  const [uRole, setURole] = useState<string>('OPERATOR');
+  const [uSelectedWarehouseIds, setUSelectedWarehouseIds] = useState<number[]>([]);
+  const [uCanReceive, setUCanReceive] = useState<boolean>(true);
+  const [uCanDispatch, setUCanDispatch] = useState<boolean>(true);
+  const [uCanProduce, setUCanProduce] = useState<boolean>(true);
+  const [uCanCreateCatalog, setUCanCreateCatalog] = useState<boolean>(false);
   const [submittingUser, setSubmittingUser] = useState(false);
 
   // Reset inventory state
@@ -289,22 +294,74 @@ export function OperationsAuditAndPrivateView({
     }
   };
 
-  const handleCreateUser = async (e: React.FormEvent) => {
+  const openCreateUserModal = () => {
+    setEditingUserId(null);
+    setUUsername('');
+    setUPassword('');
+    setUFullName('');
+    setURole('OPERATOR');
+    setUSelectedWarehouseIds(data.allWarehousesSummary.map((w) => w.id));
+    setUCanReceive(true);
+    setUCanDispatch(true);
+    setUCanProduce(true);
+    setUCanCreateCatalog(false);
+    setShowUserModal(true);
+  };
+
+  const openEditUserModal = (targetUser: any) => {
+    const perms = data.userWarehousePermissions.filter((p) => p.userId === targetUser.id);
+    setEditingUserId(targetUser.id);
+    setUUsername(targetUser.username);
+    setUPassword('');
+    setUFullName(targetUser.fullName);
+    setURole(targetUser.role === 'OWNER' ? 'ADMIN' : targetUser.role);
+    setUSelectedWarehouseIds(
+      perms.length > 0
+        ? perms.map((p) => p.warehouseId)
+        : data.allWarehousesSummary.map((w) => w.id)
+    );
+    setUCanReceive(perms.length > 0 ? perms.some((p) => p.canReceive) : true);
+    setUCanDispatch(perms.length > 0 ? perms.some((p) => p.canDispatch) : true);
+    setUCanProduce(perms.length > 0 ? perms.some((p) => p.canProduce) : false);
+    setUCanCreateCatalog(perms.some((p) => p.canApproveAdjustments));
+    setShowUserModal(true);
+  };
+
+  const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmittingUser(true);
     try {
-      await apiFetch('/api/users', {
-        method: 'POST',
-        body: JSON.stringify({
-          username: uUsername,
-          password: uPassword,
-          fullName: uFullName,
-          role: uRole,
-          warehouseId: uWarehouseId ? Number(uWarehouseId) : null,
-        }),
-      });
-      notify('Usuario creado correctamente');
+      const payload = {
+        username: uUsername,
+        password: uPassword,
+        fullName: uFullName,
+        role: uRole,
+        warehouseIds:
+          uSelectedWarehouseIds.length > 0
+            ? uSelectedWarehouseIds
+            : data.allWarehousesSummary.map((w) => w.id),
+        canReceive: uCanReceive,
+        canDispatch: uCanDispatch,
+        canProduce: uCanProduce,
+        canCreateCatalog: uCanCreateCatalog,
+      };
+
+      if (editingUserId) {
+        await apiFetch(`/api/users/${editingUserId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        notify(`Permisos de "${uFullName}" actualizados correctamente`);
+      } else {
+        await apiFetch('/api/users', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        notify(`Usuario "${uFullName}" creado correctamente`);
+      }
+
       setShowUserModal(false);
+      setEditingUserId(null);
       setUUsername('');
       setUPassword('');
       setUFullName('');
@@ -1671,7 +1728,7 @@ export function OperationsAuditAndPrivateView({
       )}
 
       {/* =====================================================================
-          3. GESTION DE USUARIOS Y ACCESOS
+          3. GESTION DE USUARIOS Y PERMISOS GRANULARES (PERSONAL vs ADMIN)
          ===================================================================== */}
       {subTab === 'USERS' && (
         <div className="space-y-6">
@@ -1679,25 +1736,16 @@ export function OperationsAuditAndPrivateView({
             <div>
               <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                 <Users className="w-5 h-5 text-blue-600" />
-                Usuarios, Operarios y Permisos
+                Gestión de Usuarios y Permisos del Personal
               </h2>
-              <p className="text-sm text-slate-500 mt-0.5">
-                Administra las cuentas de acceso para encargados de almacén, producción o recogida.
+              <p className="text-xs text-slate-600 mt-1">
+                El <strong>Personal Operativo</strong> nunca puede eliminar productos ni almacenes.
+                Como Administrador puedes elegir si cada usuario solo registra{' '}
+                <strong>Entradas / Salidas</strong> o si también tiene permiso para{' '}
+                <strong>Crear Productos, Almacenes y Departamentos</strong>.
               </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2.5">
-              {isOwnerOrAdmin && (
-                <button
-                  onClick={handleRunV2Verification}
-                  disabled={runningV2Verify}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
-                >
-                  <FlaskConical className="w-4 h-4" />
-                  {runningV2Verify
-                    ? 'Verificando cálculos...'
-                    : 'Verificar Cálculos (Simulación con Rollback)'}
-                </button>
-              )}
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
               {data.user.role === 'OWNER' && (
                 <button
                   onClick={() => setShowResetConfirm(true)}
@@ -1709,100 +1757,143 @@ export function OperationsAuditAndPrivateView({
               )}
               {isOwnerOrAdmin && (
                 <button
-                  onClick={() => setShowUserModal(true)}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl shadow-xs cursor-pointer"
+                  onClick={openCreateUserModal}
+                  className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer"
                 >
                   <Plus className="w-4 h-4" />
-                  Nuevo Usuario
+                  Nuevo Usuario / Personal
                 </button>
               )}
             </div>
           </div>
 
-          {v2VerificationResult && (
-            <div className="bg-emerald-950 text-emerald-100 rounded-2xl p-5 border border-emerald-800 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="font-bold text-sm flex items-center gap-2 text-emerald-300">
-                  <CheckCircle2 className="w-4 h-4" />
-                  Simulación Transaccional Aislada (v2.0): PASÓ 10/10 PRUEBAS (0 datos de prueba en BD)
-                </div>
-                <button
-                  onClick={() => setV2VerificationResult(null)}
-                  className="text-xs text-emerald-300 underline cursor-pointer"
-                >
-                  Ocultar
-                </button>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-mono">
-                {v2VerificationResult.steps?.map((s: any, idx: number) => (
-                  <div
-                    key={idx}
-                    className="p-2.5 rounded-lg bg-emerald-900/50 border border-emerald-800/80"
-                  >
-                    <div className="font-bold text-white flex items-center justify-between">
-                      <span>{s.step}</span>
-                      <span className="text-emerald-300">{s.passed ? '✓ OK' : '✗ ERROR'}</span>
-                    </div>
-                    <div className="text-emerald-300 mt-0.5">{s.details}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
-                  <th className="py-3.5 px-4">Usuario (Login)</th>
-                  <th className="py-3.5 px-4">Nombre Completo</th>
-                  <th className="py-3.5 px-4">Rol en el Sistema</th>
-                  <th className="py-3.5 px-4">Almacenes Permitidos</th>
-                  <th className="py-3.5 px-4 text-right">Acciones</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100 text-sm">
-                {data.usersPublic.map((u) => {
-                  const perms = data.userWarehousePermissions.filter((p) => p.userId === u.id);
-                  return (
-                    <tr key={u.id} className="hover:bg-slate-50">
-                      <td className="py-3.5 px-4 font-mono font-bold text-slate-900">{u.username}</td>
-                      <td className="py-3.5 px-4 font-medium text-slate-800">{u.fullName}</td>
-                      <td className="py-3.5 px-4">
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200">
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          {translateRole(u.role)}
-                        </span>
-                      </td>
-                      <td className="py-3.5 px-4 text-slate-600 text-xs">
-                        {u.role === 'OWNER' || u.role === 'ADMIN'
-                          ? 'Todos los almacenes'
-                          : perms.map((p) => getWarehouseName(p.warehouseId)).join(', ') || 'Sin asignar'}
-                      </td>
-                      <td className="py-3.5 px-4 text-right">
-                        {u.username !== 'admin' && data.user.role === 'OWNER' && (
-                          <button
-                            onClick={() => handleDeleteUser(u.id, u.username)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50 rounded-lg cursor-pointer"
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
+                    <th className="py-3.5 px-4">Usuario / Nombre</th>
+                    <th className="py-3.5 px-4">Nivel</th>
+                    <th className="py-3.5 px-4">Permisos Habilitados</th>
+                    <th className="py-3.5 px-4">Almacenes</th>
+                    <th className="py-3.5 px-4 text-right">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-xs">
+                  {data.usersPublic.map((u) => {
+                    const perms = data.userWarehousePermissions.filter((p) => p.userId === u.id);
+                    const isUserAdmin = u.role === 'OWNER' || u.role === 'ADMIN';
+                    const hasReceive = isUserAdmin || perms.some((p) => p.canReceive);
+                    const hasDispatch = isUserAdmin || perms.some((p) => p.canDispatch);
+                    const hasProduce = isUserAdmin || perms.some((p) => p.canProduce);
+                    const hasCreateCatalog =
+                      isUserAdmin || perms.some((p) => p.canApproveAdjustments);
+
+                    return (
+                      <tr key={u.id} className="hover:bg-slate-50">
+                        <td className="py-3.5 px-4">
+                          <div className="font-bold text-slate-900 text-sm">{u.fullName}</div>
+                          <div className="font-mono text-slate-500">@{u.username}</div>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold border ${
+                              isUserAdmin
+                                ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                : 'bg-slate-100 text-slate-800 border-slate-200'
+                            }`}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            Eliminar
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            {isUserAdmin ? 'Administrador' : 'Personal Operativo'}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <div className="flex flex-wrap gap-1.5">
+                            {hasReceive && (
+                              <span className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold">
+                                ✓ Ingresar (Entradas)
+                              </span>
+                            )}
+                            {hasDispatch && (
+                              <span className="px-2 py-0.5 rounded-md bg-amber-50 text-amber-900 border border-amber-200 font-semibold">
+                                ✓ Retirar (Salidas)
+                              </span>
+                            )}
+                            {hasProduce && (
+                              <span className="px-2 py-0.5 rounded-md bg-sky-50 text-sky-800 border border-sky-200 font-semibold">
+                                ✓ Producción
+                              </span>
+                            )}
+                            {hasCreateCatalog && (
+                              <span className="px-2 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200 font-semibold">
+                                ✓ Crear Productos / Almacenes
+                              </span>
+                            )}
+                            {isUserAdmin ? (
+                              <span className="px-2 py-0.5 rounded-md bg-purple-50 text-purple-800 border border-purple-200 font-semibold">
+                                ★ Puede Eliminar
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-500 font-medium">
+                                ✕ Sin permiso de eliminar
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-600">
+                          {isUserAdmin || perms.length >= data.allWarehousesSummary.length
+                            ? 'Todos los almacenes'
+                            : perms.map((p) => getWarehouseName(p.warehouseId)).join(', ') ||
+                              'Sin asignar'}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          {isOwnerOrAdmin && (
+                            <div className="inline-flex items-center gap-1.5">
+                              {u.role !== 'OWNER' && (
+                                <button
+                                  type="button"
+                                  onClick={() => openEditUserModal(u)}
+                                  className="px-3 py-1.5 text-xs font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg cursor-pointer"
+                                >
+                                  Editar Permisos
+                                </button>
+                              )}
+                              {u.username !== 'admin' && u.role !== 'OWNER' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteUser(u.id, u.username)}
+                                  className="p-1.5 text-red-600 hover:bg-red-50 border border-red-200 rounded-lg cursor-pointer"
+                                  title="Eliminar usuario"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          {/* Create User Modal */}
+          {/* Create / Edit User & Permissions Modal */}
           {showUserModal && (
-            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-              <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200">
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+              <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 my-8">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100 mb-4">
-                  <h3 className="text-lg font-bold text-slate-900">Crear Nuevo Usuario</h3>
+                  <div>
+                    <h3 className="text-base font-bold text-slate-900">
+                      {editingUserId
+                        ? 'Configurar Permisos del Usuario'
+                        : 'Nuevo Usuario / Personal'}
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Define qué acciones puede realizar este miembro de tu equipo
+                    </p>
+                  </div>
                   <button
                     onClick={() => setShowUserModal(false)}
                     className="text-slate-400 hover:text-slate-600 cursor-pointer"
@@ -1810,37 +1901,40 @@ export function OperationsAuditAndPrivateView({
                     <X className="w-5 h-5" />
                   </button>
                 </div>
-                <form onSubmit={handleCreateUser} className="space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
+
+                <form onSubmit={handleSaveUser} className="space-y-4 text-xs">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                      <label className="block font-bold text-slate-700 mb-1">
                         Usuario (Login) *
                       </label>
                       <input
                         type="text"
                         required
+                        disabled={Boolean(editingUserId)}
                         value={uUsername}
                         onChange={(e) => setUUsername(e.target.value)}
-                        placeholder="Ej. juan"
-                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl"
+                        placeholder="Ej. carlos"
+                        className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl disabled:bg-slate-100"
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-bold text-slate-700 mb-1">
-                        Contraseña *
+                      <label className="block font-bold text-slate-700 mb-1">
+                        {editingUserId ? 'Nueva Contraseña (Opcional)' : 'Contraseña *'}
                       </label>
                       <input
                         type="text"
-                        required
+                        required={!editingUserId}
                         value={uPassword}
                         onChange={(e) => setUPassword(e.target.value)}
-                        placeholder="Ej. 1234"
+                        placeholder={editingUserId ? 'Dejar vacío para mantener' : 'Ej. 1234'}
                         className="w-full px-3 py-2 text-sm font-mono border border-slate-300 rounded-xl"
                       />
                     </div>
                   </div>
+
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
+                    <label className="block font-bold text-slate-700 mb-1">
                       Nombre Completo *
                     </label>
                     <input
@@ -1848,52 +1942,174 @@ export function OperationsAuditAndPrivateView({
                       required
                       value={uFullName}
                       onChange={(e) => setUFullName(e.target.value)}
-                      placeholder="Ej. Juan Pérez"
+                      placeholder="Ej. Carlos Mamani"
                       className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
                     />
                   </div>
+
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">Rol *</label>
-                    <select
-                      value={uRole}
-                      onChange={(e) => setURole(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
-                    >
-                      <option value="WAREHOUSE_MANAGER">Encargado de Almacén</option>
-                      <option value="PRODUCTION_MANAGER">Encargado de Producción (Taller)</option>
-                      <option value="OPERATOR">Operario de Taller</option>
-                      <option value="ADMIN">Administrador Operativo</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">
-                      Almacén Asignado
+                    <label className="block font-bold text-slate-700 mb-1">
+                      Tipo de Cuenta *
                     </label>
                     <select
-                      value={uWarehouseId}
-                      onChange={(e) => setUWarehouseId(e.target.value)}
-                      className="w-full px-3 py-2 text-sm border border-slate-300 rounded-xl"
+                      value={uRole === 'ADMIN' ? 'ADMIN' : 'OPERATOR'}
+                      onChange={(e) => setURole(e.target.value)}
+                      className="w-full px-3 py-2.5 text-sm border border-slate-300 rounded-xl bg-white font-semibold"
                     >
-                      <option value="">Seleccionar almacén...</option>
-                      {data.warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>{w.name}</option>
-                      ))}
+                      <option value="OPERATOR">
+                        Personal Operativo (NO puede eliminar productos ni almacenes)
+                      </option>
+                      <option value="ADMIN">
+                        Administrador (Control total: puede crear, editar y eliminar)
+                      </option>
                     </select>
                   </div>
+
+                  {uRole !== 'ADMIN' && (
+                    <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5">
+                      <div className="font-bold text-slate-900">
+                        Permisos habilitados para este personal:
+                      </div>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer p-1.5 rounded-lg hover:bg-white">
+                        <input
+                          type="checkbox"
+                          checked={uCanReceive}
+                          onChange={(e) => setUCanReceive(e.target.checked)}
+                          className="mt-0.5 rounded border-slate-300 text-emerald-600"
+                        />
+                        <div>
+                          <div className="font-bold text-slate-900">
+                            Registrar Entradas (Botón "Ingresar")
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Permite sumar mercadería o insumos al stock disponible
+                          </div>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer p-1.5 rounded-lg hover:bg-white">
+                        <input
+                          type="checkbox"
+                          checked={uCanDispatch}
+                          onChange={(e) => setUCanDispatch(e.target.checked)}
+                          className="mt-0.5 rounded border-slate-300 text-amber-600"
+                        />
+                        <div>
+                          <div className="font-bold text-slate-900">
+                            Registrar Salidas (Botón "Retirar")
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Permite retirar insumos o productos disponibles
+                          </div>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer p-1.5 rounded-lg hover:bg-white">
+                        <input
+                          type="checkbox"
+                          checked={uCanProduce}
+                          onChange={(e) => setUCanProduce(e.target.checked)}
+                          className="mt-0.5 rounded border-slate-300 text-sky-600"
+                        />
+                        <div>
+                          <div className="font-bold text-slate-900">
+                            Registrar Avances en Órdenes de Producción
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Permite recibir chips UDP y reportar lotes terminados
+                          </div>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start gap-2.5 cursor-pointer p-1.5 rounded-lg hover:bg-white border-t border-slate-200 pt-2.5">
+                        <input
+                          type="checkbox"
+                          checked={uCanCreateCatalog}
+                          onChange={(e) => setUCanCreateCatalog(e.target.checked)}
+                          className="mt-0.5 rounded border-slate-300 text-blue-600"
+                        />
+                        <div>
+                          <div className="font-bold text-blue-950">
+                            Crear Productos, Almacenes y Departamentos (Sin poder eliminar)
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            Habilita crear nuevos productos o almacenes, pero mantiene bloqueado el
+                            botón Eliminar
+                          </div>
+                        </div>
+                      </label>
+                    </div>
+                  )}
+
+                  {uRole !== 'ADMIN' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="font-bold text-slate-700">
+                          Almacenes donde puede operar *
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setUSelectedWarehouseIds(data.allWarehousesSummary.map((w) => w.id))
+                          }
+                          className="text-[11px] font-bold text-blue-600 hover:underline cursor-pointer"
+                        >
+                          Seleccionar todos
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {data.allWarehousesSummary.map((w) => {
+                          const checked = uSelectedWarehouseIds.includes(w.id);
+                          return (
+                            <label
+                              key={w.id}
+                              className={`p-2 rounded-xl border flex items-center gap-2 cursor-pointer ${
+                                checked
+                                  ? 'bg-blue-50/70 border-blue-300 font-semibold text-slate-900'
+                                  : 'bg-white border-slate-200 text-slate-600'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setUSelectedWarehouseIds((prev) => [...prev, w.id]);
+                                  } else {
+                                    setUSelectedWarehouseIds((prev) =>
+                                      prev.filter((id) => id !== w.id)
+                                    );
+                                  }
+                                }}
+                                className="rounded border-slate-300"
+                              />
+                              <span className="truncate">{w.name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
                     <button
                       type="button"
                       onClick={() => setShowUserModal(false)}
-                      className="px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
+                      className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
                     >
                       Cancelar
                     </button>
                     <button
                       type="submit"
                       disabled={submittingUser}
-                      className="px-5 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer"
+                      className="px-5 py-2 font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer"
                     >
-                      {submittingUser ? 'Guardando...' : 'Crear Usuario'}
+                      {submittingUser
+                        ? 'Guardando...'
+                        : editingUserId
+                        ? 'Guardar Cambios'
+                        : 'Crear Usuario'}
                     </button>
                   </div>
                 </form>

@@ -339,14 +339,25 @@ async function startServer() {
     }
   });
 
+  const canUserCreateOrEditCatalog = (user: AuthRequest['authUser']) => {
+    if (!user) return false;
+    return (
+      user.role === 'OWNER' ||
+      user.role === 'ADMIN' ||
+      user.warehousePermissions.some((p) => p.canApproveAdjustments)
+    );
+  };
+
   // =========================================================================
   // 4. CLASSIFICATIONS / DEPARTMENTS CRUD (Crear, Editar, Eliminar)
   // =========================================================================
   app.post('/api/categories', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
-      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Solo el Administrador puede crear clasificaciones.' });
+      if (!canUserCreateOrEditCatalog(user)) {
+        return res.status(403).json({
+          error: 'No tiene permiso para crear departamentos.',
+        });
       }
       const { name, accountingType, description, colorHex } = req.body;
       if (!name || !String(name).trim()) {
@@ -372,8 +383,8 @@ async function startServer() {
   app.put('/api/categories/:id', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
-      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Solo el Administrador puede editar clasificaciones.' });
+      if (!canUserCreateOrEditCatalog(user)) {
+        return res.status(403).json({ error: 'No tiene permiso para editar departamentos.' });
       }
       const catId = Number(req.params.id);
       const { name, accountingType, description, colorHex } = req.body;
@@ -438,9 +449,9 @@ async function startServer() {
   app.post('/api/products', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
-      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+      if (!canUserCreateOrEditCatalog(user)) {
         return res.status(403).json({
-          error: 'Solo el Administrador puede crear productos en el catálogo.',
+          error: 'No tiene permiso para crear productos en el catálogo.',
         });
       }
 
@@ -551,8 +562,8 @@ async function startServer() {
   app.put('/api/products/:id', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
-      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Solo el Administrador puede editar productos.' });
+      if (!canUserCreateOrEditCatalog(user)) {
+        return res.status(403).json({ error: 'No tiene permiso para editar productos.' });
       }
 
       const prodId = Number(req.params.id);
@@ -858,8 +869,8 @@ async function startServer() {
   app.post('/api/warehouses', requireAuth, async (req: AuthRequest, res) => {
     try {
       const user = req.authUser!;
-      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
-        return res.status(403).json({ error: 'Solo el Administrador puede configurar almacenes.' });
+      if (!canUserCreateOrEditCatalog(user)) {
+        return res.status(403).json({ error: 'No tiene permiso para crear almacenes o subalmacenes.' });
       }
 
       const {
@@ -1162,14 +1173,14 @@ async function startServer() {
       }
 
       if (
-        (withdrawalMode === 'CONSUMO_OPERATIVO' || withdrawalMode === 'MERMA_DANO') &&
+        withdrawalMode === 'MERMA_DANO' &&
         user.role !== 'OWNER' &&
         user.role !== 'ADMIN' &&
-        user.role !== 'WAREHOUSE_MANAGER'
+        user.role !== 'WAREHOUSE_MANAGER' &&
+        !assertWarehouseAccess(user, whIdNum, 'DISPATCH')
       ) {
         return res.status(403).json({
-          error:
-            'Los retiros por consumo operativo o merma requieren autorización de Administrador o Encargado de Almacén.',
+          error: 'No tiene permiso para registrar bajas por merma en este almacén.',
         });
       }
 
@@ -1491,11 +1502,23 @@ async function startServer() {
       if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
         return res.status(403).json({ error: 'Solo el Administrador puede crear usuarios.' });
       }
-      const { username, password, fullName, role, warehouseId } = req.body;
+      const {
+        username,
+        password,
+        fullName,
+        role,
+        warehouseId,
+        warehouseIds,
+        canReceive = true,
+        canDispatch = true,
+        canProduce = true,
+        canCreateCatalog = false,
+      } = req.body;
       if (!username || !password || !fullName) {
         return res.status(400).json({ error: 'Complete usuario, contraseña y nombre completo.' });
       }
       const cleanU = String(username).trim().toLowerCase();
+      const assignedRole = role || 'WAREHOUSE_MANAGER';
       const [newUser] = await db
         .insert(users)
         .values({
@@ -1503,29 +1526,108 @@ async function startServer() {
           username: cleanU,
           email: `${cleanU}@controlstock.bo`,
           fullName: String(fullName).trim(),
-          role: role || 'WAREHOUSE_MANAGER',
+          role: assignedRole,
           passwordHash: hashPassword(String(password)),
           isActive: true,
-          canViewPrivateCosts: role === 'OWNER',
+          canViewPrivateCosts: assignedRole === 'OWNER',
         })
         .returning();
 
-      if (warehouseId) {
+      const allWhs = await db.select().from(warehouses);
+      let targetWhIds: number[] = [];
+      if (Array.isArray(warehouseIds) && warehouseIds.length > 0) {
+        targetWhIds = warehouseIds.map((id: any) => Number(id));
+      } else if (warehouseId) {
+        targetWhIds = [Number(warehouseId)];
+      } else {
+        targetWhIds = allWhs.map((w) => w.id);
+      }
+
+      for (const wId of targetWhIds) {
         await db.insert(userWarehousePermissions).values({
           userId: newUser.id,
-          warehouseId: Number(warehouseId),
+          warehouseId: wId,
           canView: true,
-          canReceive: true,
-          canDispatch: true,
-          canProduce: true,
+          canReceive: Boolean(canReceive),
+          canDispatch: Boolean(canDispatch),
+          canProduce: Boolean(canProduce),
           canCount: true,
-          canApproveAdjustments: role === 'OWNER',
+          canApproveAdjustments:
+            assignedRole === 'OWNER' || assignedRole === 'ADMIN' || Boolean(canCreateCatalog),
         });
       }
 
       return res.json({ user: newUser });
     } catch (error: any) {
       return res.status(400).json({ error: 'El nombre de usuario ya existe o los datos son inválidos.' });
+    }
+  });
+
+  app.put('/api/users/:id', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      if (user.role !== 'OWNER' && user.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Solo el Administrador puede modificar permisos de usuarios.' });
+      }
+      const targetId = Number(req.params.id);
+      const {
+        fullName,
+        password,
+        role,
+        warehouseIds,
+        canReceive = true,
+        canDispatch = true,
+        canProduce = true,
+        canCreateCatalog = false,
+      } = req.body;
+
+      const existing = await db.select().from(users).where(eq(users.id, targetId));
+      if (!existing[0]) {
+        return res.status(404).json({ error: 'Usuario no encontrado.' });
+      }
+
+      const nextRole = existing[0].username === 'admin' ? 'OWNER' : role || existing[0].role;
+      const updateData: Record<string, any> = {
+        fullName: fullName ? String(fullName).trim() : existing[0].fullName,
+        role: nextRole,
+      };
+      if (password && String(password).trim().length > 0) {
+        updateData.passwordHash = hashPassword(String(password).trim());
+      }
+
+      const [updatedUser] = await db
+        .update(users)
+        .set(updateData)
+        .where(eq(users.id, targetId))
+        .returning();
+
+      const allWhs = await db.select().from(warehouses);
+      const targetWhIds: number[] =
+        Array.isArray(warehouseIds) && warehouseIds.length > 0
+          ? warehouseIds.map((id: any) => Number(id))
+          : allWhs.map((w) => w.id);
+
+      await db
+        .delete(userWarehousePermissions)
+        .where(eq(userWarehousePermissions.userId, targetId));
+
+      for (const wId of targetWhIds) {
+        await db.insert(userWarehousePermissions).values({
+          userId: targetId,
+          warehouseId: wId,
+          canView: true,
+          canReceive: Boolean(canReceive),
+          canDispatch: Boolean(canDispatch),
+          canProduce: Boolean(canProduce),
+          canCount: true,
+          canApproveAdjustments:
+            nextRole === 'OWNER' || nextRole === 'ADMIN' || Boolean(canCreateCatalog),
+        });
+      }
+
+      return res.json({ user: updatedUser });
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message || 'No se pudo actualizar el usuario.' });
     }
   });
 
