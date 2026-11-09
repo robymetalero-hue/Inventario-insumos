@@ -969,53 +969,96 @@ export function CatalogAndStockView({
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {data.categories.map((cat) => {
-              const countProds = data.products.filter((p) => p.family === cat.name).length;
-              return (
-                <div
-                  key={cat.id}
-                  className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between gap-4"
+          {data.categories.length === 0 ? (
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-white rounded-2xl border border-slate-200 p-12 text-center max-w-xl mx-auto my-4 space-y-4 shadow-2xs"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center mx-auto">
+                <FolderKanban className="w-7 h-7" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-900">
+                  Sin clasificaciones registradas
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  Todas las clasificaciones anteriores fueron eliminadas. Crea tus propios departamentos personalizados (ej. Empaques, Cases, Memorias, etc.).
+                </p>
+              </div>
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={openCreateCategoryModal}
+                  className="px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl inline-flex items-center gap-2 cursor-pointer shadow-xs"
                 >
-                  <div>
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-base font-bold text-slate-900">{cat.name}</h3>
-                      <span className="text-xs font-mono text-slate-500">
-                        {countProds} productos
-                      </span>
-                    </div>
-                    <div className="text-xs font-medium text-sky-700 mt-1">
-                      {translateAccountingType(cat.accountingType)}
-                    </div>
-                    {cat.description && (
-                      <p className="text-xs text-slate-600 mt-2">{cat.description}</p>
-                    )}
-                  </div>
+                  <Plus className="w-4 h-4" />
+                  Crear Primera Clasificación
+                </button>
+              )}
+            </motion.div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              <AnimatePresence mode="popLayout">
+                {data.categories.map((cat) => {
+                  const countProds = data.products.filter((p) => p.family === cat.name).length;
+                  const CatIcon = getDepartmentIcon(cat.name, cat.accountingType);
+                  return (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      transition={{ duration: 0.16 }}
+                      key={cat.id}
+                      className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col justify-between gap-4 shadow-2xs hover:shadow-md transition-shadow"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                              <CatIcon className="w-5 h-5" />
+                            </div>
+                            <h3 className="text-base font-bold text-slate-900">{cat.name}</h3>
+                          </div>
+                          <span className="text-xs font-mono font-semibold text-slate-500 bg-slate-100 px-2.5 py-1 rounded-lg">
+                            {countProds} prod.
+                          </span>
+                        </div>
+                        <div className="text-xs font-medium text-sky-700 mt-2.5">
+                          {translateAccountingType(cat.accountingType)}
+                        </div>
+                        {cat.description && (
+                          <p className="text-xs text-slate-600 mt-1.5">{cat.description}</p>
+                        )}
+                      </div>
 
-                  {isAdmin && (
-                    <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => openEditCategoryModal(cat)}
-                        className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        Editar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteCategory(cat)}
-                        className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-md flex items-center gap-1"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Eliminar
-                      </button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                      {isAdmin && (
+                        <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openEditCategoryModal(cat)}
+                            className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center gap-1 cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            Editar
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCategory(cat)}
+                            className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-xl flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            Eliminar
+                          </button>
+                        </div>
+                      )}
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
+            </div>
+          )}
         </div>
       )}
 
@@ -1282,17 +1325,28 @@ export function CatalogAndStockView({
                 <label className="block font-semibold text-slate-800 mb-1">
                   3. Clasificación / Departamento *
                 </label>
-                <select
-                  value={prodCategoryName}
-                  onChange={(e) => setProdCategoryName(e.target.value)}
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
-                >
-                  {data.categories.map((cat) => (
-                    <option key={cat.id} value={cat.name}>
-                      {cat.name}
-                    </option>
-                  ))}
-                </select>
+                {data.categories.length > 0 ? (
+                  <select
+                    value={prodCategoryName}
+                    onChange={(e) => setProdCategoryName(e.target.value)}
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                  >
+                    {data.categories.map((cat) => (
+                      <option key={cat.id} value={cat.name}>
+                        {cat.name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={prodCategoryName}
+                    onChange={(e) => setProdCategoryName(e.target.value)}
+                    placeholder="Escribe el departamento (ej. Empaques, Cases...)"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5"
+                    required
+                  />
+                )}
               </div>
 
               {/* Initial Quantity only when creating a new product */}
