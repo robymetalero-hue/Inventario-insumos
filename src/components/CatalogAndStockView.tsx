@@ -14,7 +14,16 @@ import {
   Warehouse as WarehouseIcon,
   ChevronsRight,
   AlertTriangle,
+  Cpu,
+  HardDrive,
+  Box,
+  Layers,
+  Usb,
+  PackageCheck,
+  Building2,
+  TrendingUp,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   WorkspaceData,
   Product,
@@ -24,6 +33,17 @@ import {
   translateStatus,
   translateAccountingType,
 } from '../types.ts';
+
+function getDepartmentIcon(name: string, accountingType?: string) {
+  const n = (name || '').toLowerCase();
+  if (n.includes('udp') || n.includes('chip')) return Cpu;
+  if (n.includes('microsd') || n.includes('memoria')) return HardDrive;
+  if (n.includes('case') || n.includes('carcasa')) return Box;
+  if (n.includes('empaque') || n.includes('blister') || n.includes('blíster')) return Layers;
+  if (n.includes('adaptador') || n.includes('usb')) return Usb;
+  if (n.includes('terminado') || accountingType === 'FINISHED_GOOD') return PackageCheck;
+  return FolderKanban;
+}
 
 interface Props {
   data: WorkspaceData;
@@ -226,11 +246,15 @@ export function CatalogAndStockView({
       setDeleteConfirmProduct(null);
       setFeedback({
         type: 'success',
-        text: `Producto "${prod.name}" (${prod.sku}) eliminado correctamente.`,
+        text: `Producto "${prod.name}" (${prod.sku}) eliminado permanentemente.`,
       });
       await onRefresh();
     } catch (err: any) {
-      setFeedback({ type: 'error', text: err.message });
+      setDeleteConfirmProduct(null);
+      setFeedback({
+        type: 'error',
+        text: err.message || 'No se pudo eliminar el producto.',
+      });
     } finally {
       setSubmitting(false);
     }
@@ -516,8 +540,88 @@ export function CatalogAndStockView({
       {/* ===================================================================== */}
       {subView === 'PRODUCTS' && (
         <div className="space-y-6">
+          {/* KPI Summary Strip */}
+          {(() => {
+            const totalAvailable = data.balances
+              .filter(
+                (b) =>
+                  b.status === 'AVAILABLE' &&
+                  (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+              )
+              .reduce((s, b) => s + b.quantity, 0);
+            const totalInProcess = data.balances
+              .filter(
+                (b) =>
+                  (b.status === 'IN_PRODUCTION_CUSTODY' ||
+                    b.status === 'IN_TRANSIT_PRODUCTION' ||
+                    b.status === 'RESERVED_ORDER') &&
+                  (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+              )
+              .reduce((s, b) => s + b.quantity, 0);
+
+            return (
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3.5 shadow-2xs">
+                  <div className="w-11 h-11 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center shrink-0">
+                    <Package className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      Productos Registrados
+                    </div>
+                    <div className="text-xl font-mono font-bold text-slate-900">
+                      {formatInt(data.products.length)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3.5 shadow-2xs">
+                  <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                    <TrendingUp className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      Stock Disponible
+                    </div>
+                    <div className="text-xl font-mono font-bold text-emerald-700">
+                      {formatInt(totalAvailable)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3.5 shadow-2xs">
+                  <div className="w-11 h-11 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                    <Cpu className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      En Producción / Orden
+                    </div>
+                    <div className="text-xl font-mono font-bold text-sky-700">
+                      {formatInt(totalInProcess)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3.5 shadow-2xs">
+                  <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                    <Building2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[11px] font-semibold text-slate-500">
+                      Almacenes Activos
+                    </div>
+                    <div className="text-xl font-mono font-bold text-slate-900">
+                      {formatInt(data.warehouses.length)}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Top Action & Search Header */}
-          <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs">
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
@@ -525,11 +629,11 @@ export function CatalogAndStockView({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Buscar producto por SKU, descripción o departamento..."
-                className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600"
+                className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-600 transition-shadow"
               />
             </div>
 
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
               <select
                 value={selectedWarehouseId}
                 onChange={(e) =>
@@ -537,7 +641,7 @@ export function CatalogAndStockView({
                     e.target.value === 'ALL' ? 'ALL' : Number(e.target.value)
                   )
                 }
-                className="text-sm border border-slate-300 rounded-lg px-3.5 py-2.5 bg-white font-medium text-slate-700"
+                className="text-xs border border-slate-300 rounded-xl px-3.5 py-2.5 bg-white font-semibold text-slate-700 cursor-pointer"
               >
                 <option value="ALL">Todos los Almacenes ({data.warehouses.length})</option>
                 {data.warehouses.map((w) => (
@@ -549,52 +653,57 @@ export function CatalogAndStockView({
 
               {isAdmin && (
                 <>
-                  <button
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
                     type="button"
                     onClick={() => setSubView('CATEGORIES')}
-                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    <FolderKanban className="w-4 h-4" />
+                    <FolderKanban className="w-4 h-4 text-slate-600" />
                     Clasificaciones ({data.categories.length})
-                  </button>
+                  </motion.button>
 
-                  <button
+                  <motion.button
+                    whileTap={{ scale: 0.97 }}
                     type="button"
                     onClick={openCreateProductModal}
-                    className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                    className="px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 rounded-xl transition-all shadow-sm shadow-blue-600/20 flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
                     Nuevo Producto
-                  </button>
+                  </motion.button>
                 </>
               )}
             </div>
           </div>
 
-          {/* Interactive Classification Filter Tabs */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+          {/* Interactive Classification Filter Tabs with Custom Icons */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
             <button
               onClick={() => setSelectedCategory('ALL')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+              className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                 selectedCategory === 'ALL'
-                  ? 'bg-slate-900 text-white'
-                  : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300'
               }`}
             >
+              <Package className="w-3.5 h-3.5" />
               Todos ({data.products.length})
             </button>
             {data.categories.map((cat) => {
               const count = data.products.filter((p) => p.family === cat.name).length;
+              const CatIcon = getDepartmentIcon(cat.name, cat.accountingType);
               return (
                 <button
                   key={cat.id}
                   onClick={() => setSelectedCategory(cat.name)}
-                  className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                  className={`px-3.5 py-2 text-xs font-semibold rounded-xl transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                     selectedCategory === cat.name
-                      ? 'bg-slate-900 text-white'
-                      : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:text-slate-900 hover:border-slate-300'
                   }`}
                 >
+                  <CatIcon className="w-3.5 h-3.5" />
                   {cat.name} ({count})
                 </button>
               );
@@ -603,9 +712,13 @@ export function CatalogAndStockView({
 
           {/* Empty State when Inventory starts at 0 */}
           {filteredProducts.length === 0 ? (
-            <div className="bg-white rounded-xl border border-slate-200 p-12 text-center max-w-xl mx-auto my-6 space-y-4">
-              <div className="w-12 h-12 rounded-full bg-sky-50 text-sky-600 flex items-center justify-center mx-auto">
-                <Package className="w-6 h-6" />
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-white rounded-2xl border border-slate-200 p-12 text-center max-w-xl mx-auto my-6 space-y-4 shadow-2xs"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center mx-auto">
+                <Package className="w-7 h-7" />
               </div>
               <div className="space-y-1">
                 <h3 className="text-base font-bold text-slate-900">
@@ -624,7 +737,7 @@ export function CatalogAndStockView({
                   <button
                     type="button"
                     onClick={openCreateProductModal}
-                    className="px-5 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg inline-flex items-center gap-2"
+                    className="px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl inline-flex items-center gap-2 cursor-pointer shadow-xs"
                   >
                     <Plus className="w-4 h-4" />
                     Crear Primer Producto
@@ -632,177 +745,196 @@ export function CatalogAndStockView({
                   <button
                     type="button"
                     onClick={() => setSubView('CATEGORIES')}
-                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
                   >
                     Configurar Clasificaciones
                   </button>
                 </div>
               )}
-            </div>
+            </motion.div>
           ) : (
-            /* Clean Visual Product Cards Grid */
+            /* Clean Visual Product Cards Grid with Motion Transitions */
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-              {filteredProducts.map((product) => {
-                const prodBalances = data.balances.filter(
-                  (b) =>
-                    b.productId === product.id &&
-                    (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
-                );
-
-                const availableQty = prodBalances
-                  .filter((b) => b.status === 'AVAILABLE')
-                  .reduce((s, b) => s + b.quantity, 0);
-                const inProductionQty = prodBalances
-                  .filter(
+              <AnimatePresence mode="popLayout">
+                {filteredProducts.map((product) => {
+                  const prodBalances = data.balances.filter(
                     (b) =>
-                      b.status === 'IN_PRODUCTION_CUSTODY' ||
-                      b.status === 'IN_TRANSIT_PRODUCTION' ||
-                      b.status === 'RESERVED_ORDER'
-                  )
-                  .reduce((s, b) => s + b.quantity, 0);
-                const pendingPickupQty = prodBalances
-                  .filter(
-                    (b) =>
-                      b.status === 'FINISHED_PENDING_PICKUP' ||
-                      b.status === 'FINISHED_IN_TRANSIT'
-                  )
-                  .reduce((s, b) => s + b.quantity, 0);
+                      b.productId === product.id &&
+                      (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+                  );
 
-                return (
-                  <div
-                    key={product.id}
-                    className="bg-white rounded-xl border border-slate-200 overflow-hidden flex flex-col justify-between transition-colors hover:border-slate-300"
-                  >
-                    <div>
-                      {/* Large Legible Product Photo Header */}
-                      <div
-                        onClick={() => setZoomPhotoProduct(product)}
-                        className="relative h-44 bg-slate-900 cursor-pointer group overflow-hidden border-b border-slate-100"
-                      >
-                        {product.imageUrl ? (
-                          <img
-                            src={product.imageUrl}
-                            alt={product.name}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-500">
-                            <Package className="w-10 h-10" />
-                          </div>
-                        )}
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/20 to-transparent flex items-end justify-between p-3.5">
-                          <div className="text-xs font-mono font-bold text-white">
-                            SKU: {product.sku}
-                          </div>
-                          <div className="text-xs font-medium text-sky-300">
-                            {product.family}
-                          </div>
-                        </div>
-                      </div>
+                  const availableQty = prodBalances
+                    .filter((b) => b.status === 'AVAILABLE')
+                    .reduce((s, b) => s + b.quantity, 0);
+                  const inProductionQty = prodBalances
+                    .filter(
+                      (b) =>
+                        b.status === 'IN_PRODUCTION_CUSTODY' ||
+                        b.status === 'IN_TRANSIT_PRODUCTION' ||
+                        b.status === 'RESERVED_ORDER'
+                    )
+                    .reduce((s, b) => s + b.quantity, 0);
+                  const pendingPickupQty = prodBalances
+                    .filter(
+                      (b) =>
+                        b.status === 'FINISHED_PENDING_PICKUP' ||
+                        b.status === 'FINISHED_IN_TRANSIT'
+                    )
+                    .reduce((s, b) => s + b.quantity, 0);
 
-                      {/* Product Description & Balances */}
-                      <div className="p-4 space-y-3">
-                        <h3 className="text-base font-bold text-slate-900 leading-snug">
-                          {product.name}
-                        </h3>
+                  const DeptIcon = getDepartmentIcon(product.family, product.productType);
 
-                        <div className="grid grid-cols-3 gap-2 pt-1">
-                          <div className="p-2.5 bg-slate-50 rounded-lg">
-                            <div className="text-[11px] text-slate-500">Disponible</div>
-                            <div className="text-base font-mono font-bold text-emerald-700 tabular-nums">
-                              {formatInt(availableQty)}
+                  return (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, scale: 0.96 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.92 }}
+                      transition={{ duration: 0.18 }}
+                      key={product.id}
+                      className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col justify-between transition-all hover:shadow-md hover:border-slate-300"
+                    >
+                      <div>
+                        {/* Large Legible Product Photo Header */}
+                        <div
+                          onClick={() => setZoomPhotoProduct(product)}
+                          className="relative h-44 bg-slate-900 cursor-pointer group overflow-hidden border-b border-slate-100"
+                        >
+                          {product.imageUrl ? (
+                            <img
+                              src={product.imageUrl}
+                              alt={product.name}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-slate-500">
+                              <DeptIcon className="w-12 h-12" />
                             </div>
-                          </div>
-                          <div className="p-2.5 bg-slate-50 rounded-lg">
-                            <div className="text-[11px] text-slate-500">En Producción</div>
-                            <div className="text-base font-mono font-semibold text-sky-700 tabular-nums">
-                              {formatInt(inProductionQty)}
+                          )}
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent flex items-end justify-between p-3.5">
+                            <div className="text-xs font-mono font-bold text-white bg-black/40 backdrop-blur-xs px-2.5 py-1 rounded-lg border border-white/15">
+                              {product.sku}
                             </div>
-                          </div>
-                          <div className="p-2.5 bg-slate-50 rounded-lg">
-                            <div className="text-[11px] text-slate-500">Por Recoger</div>
-                            <div className="text-base font-mono font-semibold text-indigo-700 tabular-nums">
-                              {formatInt(pendingPickupQty)}
+                            <div className="text-xs font-semibold text-sky-300 flex items-center gap-1.5 bg-slate-950/60 backdrop-blur-xs px-2.5 py-1 rounded-lg">
+                              <DeptIcon className="w-3.5 h-3.5" />
+                              {product.family}
                             </div>
                           </div>
                         </div>
 
-                        {/* Warehouse Breakdown */}
-                        {prodBalances.length > 0 ? (
-                          <div className="pt-2 border-t border-slate-100 space-y-1 text-xs">
-                            <div className="text-[11px] font-medium text-slate-500">
-                              Ubicación actual del stock:
+                        {/* Product Description & Balances */}
+                        <div className="p-4 space-y-3">
+                          <h3 className="text-base font-bold text-slate-900 leading-snug">
+                            {product.name}
+                          </h3>
+
+                          <div className="grid grid-cols-3 gap-2 pt-1">
+                            <div className="p-2.5 bg-emerald-50/60 border border-emerald-100 rounded-xl">
+                              <div className="text-[11px] font-medium text-emerald-800">
+                                Disponible
+                              </div>
+                              <div className="text-base font-mono font-bold text-emerald-700 tabular-nums">
+                                {formatInt(availableQty)}
+                              </div>
                             </div>
-                            {prodBalances.map((b) => {
-                              const wh = data.warehouses.find((w) => w.id === b.warehouseId);
-                              const loc = data.locations.find((l) => l.id === b.locationId);
-                              return (
-                                <div
-                                  key={b.id}
-                                  className="flex items-center justify-between text-slate-700 py-0.5"
-                                >
-                                  <span className="truncate pr-2">
-                                    <strong>{wh?.name}</strong> ({loc?.zoneName}) ·{' '}
-                                    <span className="text-slate-500">
-                                      {translateStatus(b.status)}
+                            <div className="p-2.5 bg-sky-50/60 border border-sky-100 rounded-xl">
+                              <div className="text-[11px] font-medium text-sky-800">
+                                Producción
+                              </div>
+                              <div className="text-base font-mono font-semibold text-sky-700 tabular-nums">
+                                {formatInt(inProductionQty)}
+                              </div>
+                            </div>
+                            <div className="p-2.5 bg-indigo-50/60 border border-indigo-100 rounded-xl">
+                              <div className="text-[11px] font-medium text-indigo-800">
+                                Por Recoger
+                              </div>
+                              <div className="text-base font-mono font-semibold text-indigo-700 tabular-nums">
+                                {formatInt(pendingPickupQty)}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Warehouse Breakdown */}
+                          {prodBalances.length > 0 ? (
+                            <div className="pt-2 border-t border-slate-100 space-y-1 text-xs">
+                              <div className="text-[11px] font-medium text-slate-500">
+                                Ubicación actual del stock:
+                              </div>
+                              {prodBalances.map((b) => {
+                                const wh = data.warehouses.find((w) => w.id === b.warehouseId);
+                                const loc = data.locations.find((l) => l.id === b.locationId);
+                                return (
+                                  <div
+                                    key={b.id}
+                                    className="flex items-center justify-between text-slate-700 py-0.5"
+                                  >
+                                    <span className="truncate pr-2">
+                                      <strong>{wh?.name}</strong> ({loc?.zoneName}) ·{' '}
+                                      <span className="text-slate-500">
+                                        {translateStatus(b.status)}
+                                      </span>
                                     </span>
-                                  </span>
-                                  <span className="font-mono font-bold text-slate-900 tabular-nums shrink-0">
-                                    {formatInt(b.quantity)} u.
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div className="pt-2 border-t border-slate-100 text-xs text-slate-400">
-                            Sin existencias registradas todavía (0 unidades).
+                                    <span className="font-mono font-bold text-slate-900 tabular-nums shrink-0">
+                                      {formatInt(b.quantity)} u.
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="pt-2 border-t border-slate-100 text-xs text-slate-400">
+                              Sin existencias registradas todavía (0 unidades).
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Card Footer Actions: Add Stock, Edit, Delete */}
+                      <div className="px-4 py-3 bg-slate-50/80 border-t border-slate-200/80 flex items-center justify-between gap-2">
+                        <motion.button
+                          whileTap={{ scale: 0.96 }}
+                          type="button"
+                          onClick={() => {
+                            setQuickStockProduct(product);
+                            setQuickStockQty(500);
+                            setQuickStockWhId(data.warehouses[0]?.id || 0);
+                          }}
+                          className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
+                        >
+                          <ArrowDownToLine className="w-3.5 h-3.5" />
+                          Ingresar Stock
+                        </motion.button>
+
+                        {isAdmin && (
+                          <div className="flex items-center gap-1.5">
+                            <motion.button
+                              whileTap={{ scale: 0.95 }}
+                              type="button"
+                              onClick={() => openEditProductModal(product)}
+                              className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-xl flex items-center gap-1.5 cursor-pointer"
+                              title="Editar producto"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              Editar
+                            </motion.button>
+                            <motion.button
+                              whileTap={{ scale: 0.95 }}
+                              type="button"
+                              onClick={() => setDeleteConfirmProduct(product)}
+                              className="p-2 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-xl cursor-pointer"
+                              title="Eliminar producto"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </motion.button>
                           </div>
                         )}
                       </div>
-                    </div>
-
-                    {/* Card Footer Actions: Add Stock, Edit, Delete */}
-                    <div className="px-4 py-3 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setQuickStockProduct(product);
-                          setQuickStockQty(500);
-                          setQuickStockWhId(data.warehouses[0]?.id || 0);
-                        }}
-                        className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                      >
-                        <ArrowDownToLine className="w-3.5 h-3.5" />
-                        Ingresar Stock
-                      </button>
-
-                      {isAdmin && (
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => openEditProductModal(product)}
-                            className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-md flex items-center gap-1"
-                            title="Editar producto"
-                          >
-                            <Edit3 className="w-3.5 h-3.5" />
-                            Editar
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setDeleteConfirmProduct(product)}
-                            className="p-1.5 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-md"
-                            title="Eliminar producto"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                    </motion.div>
+                  );
+                })}
+              </AnimatePresence>
             </div>
           )}
         </div>

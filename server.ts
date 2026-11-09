@@ -34,7 +34,7 @@ import {
   createLocalSessionToken,
   loadUserWithPermissions,
   logSecurityEvent,
-  AuthRequest,
+  type AuthRequest,
 } from './src/middleware/auth.ts';
 import {
   normalizeProductKey,
@@ -587,11 +587,35 @@ async function startServer() {
 
       const prodId = Number(req.params.id);
 
-      // Clean up dependent records in a transaction so admin can freely delete any product
+      // Clean up all direct and transitive dependent records in a transaction
       await db.transaction(async (tx) => {
         await tx.delete(privatePurchaseBatches).where(eq(privatePurchaseBatches.productId, prodId));
         await tx.delete(physicalCounts).where(eq(physicalCounts.productId, prodId));
         await tx.delete(warehouseTransfers).where(eq(warehouseTransfers.productId, prodId));
+
+        // 1. Orders where this product is the strategic component
+        const ordersForProd = await tx
+          .select()
+          .from(productionOrders)
+          .where(eq(productionOrders.strategicProductId, prodId));
+        const orderIds = ordersForProd.map((o) => o.id);
+
+        if (orderIds.length > 0) {
+          await tx
+            .delete(finishedGoodsDispatches)
+            .where(inArray(finishedGoodsDispatches.productionOrderId, orderIds));
+          await tx
+            .delete(productionDispatches)
+            .where(inArray(productionDispatches.productionOrderId, orderIds));
+          await tx
+            .delete(productionBatches)
+            .where(inArray(productionBatches.productionOrderId, orderIds));
+          await tx
+            .delete(productionOrders)
+            .where(inArray(productionOrders.id, orderIds));
+        }
+
+        // 2. Direct dispatches & batches for this product
         await tx
           .delete(finishedGoodsDispatches)
           .where(eq(finishedGoodsDispatches.finishedProductId, prodId));
@@ -599,38 +623,58 @@ async function startServer() {
         await tx
           .delete(productionBatches)
           .where(eq(productionBatches.finishedProductId, prodId));
-        await tx
-          .delete(productionOrders)
-          .where(eq(productionOrders.strategicProductId, prodId));
+
+        // 3. Recipe components where this product is used
         await tx
           .delete(recipeComponents)
           .where(eq(recipeComponents.componentProductId, prodId));
 
+        // 4. Recipes & RecipeVersions that produce this product
         const prodRecipes = await tx
           .select()
           .from(recipes)
           .where(eq(recipes.finishedProductId, prodId));
-        for (const r of prodRecipes) {
-          const vers = await tx
+        const prodVerRows = await tx
+          .select()
+          .from(recipeVersions)
+          .where(eq(recipeVersions.finishedProductId, prodId));
+
+        const recipeIdsSet = new Set<number>([
+          ...prodRecipes.map((r) => r.id),
+          ...prodVerRows.map((v) => v.recipeId),
+        ]);
+        const recipeIds = Array.from(recipeIdsSet);
+
+        if (recipeIds.length > 0) {
+          const allVers = await tx
             .select()
             .from(recipeVersions)
-            .where(eq(recipeVersions.recipeId, r.id));
-          for (const v of vers) {
+            .where(inArray(recipeVersions.recipeId, recipeIds));
+          const verIds = allVers.map((v) => v.id);
+          if (verIds.length > 0) {
             await tx
               .delete(recipeComponents)
-              .where(eq(recipeComponents.recipeVersionId, v.id));
+              .where(inArray(recipeComponents.recipeVersionId, verIds));
+            await tx
+              .delete(productionBatches)
+              .where(inArray(productionBatches.recipeVersionId, verIds));
           }
-          await tx.delete(productionBatches).where(eq(productionBatches.recipeId, r.id));
-          await tx.delete(recipeVersions).where(eq(recipeVersions.recipeId, r.id));
-          await tx.delete(recipes).where(eq(recipes.id, r.id));
+          await tx
+            .delete(productionBatches)
+            .where(inArray(productionBatches.recipeId, recipeIds));
+          await tx
+            .delete(recipeVersions)
+            .where(inArray(recipeVersions.recipeId, recipeIds));
+          await tx.delete(recipes).where(inArray(recipes.id, recipeIds));
         }
 
+        // 5. Ledger lines, balances & the product itself
         await tx.delete(inventoryMovementLines).where(eq(inventoryMovementLines.productId, prodId));
         await tx.delete(inventoryBalances).where(eq(inventoryBalances.productId, prodId));
         await tx.delete(products).where(eq(products.id, prodId));
       });
 
-      return res.json({ deleted: true });
+      return res.json({ deleted: true, productId: prodId });
     } catch (error: any) {
       console.error('Error deleting product:', error);
       return res.status(400).json({ error: error.message || 'No se pudo eliminar el producto.' });
@@ -1348,7 +1392,7 @@ async function startServer() {
     });
   } else {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false, watch: null },
       appType: 'spa',
     });
     app.use(vite.middlewares);

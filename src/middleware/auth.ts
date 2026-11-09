@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
 import { adminAuth } from '../lib/firebase-admin.ts';
 import { db } from '../db/index.ts';
@@ -43,7 +43,7 @@ export function createLocalSessionToken(userId: number, uid: string): string {
   const payload = JSON.stringify({
     userId,
     uid,
-    exp: Date.now() + 1000 * 60 * 60 * 12, // 12 hours
+    exp: Date.now() + 1000 * 60 * 60 * 24 * 30, // 30 days
   });
   const base64Payload = Buffer.from(payload).toString('base64url');
   const signature = crypto
