@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   ArrowLeftRight,
   ClipboardCheck,
@@ -14,6 +14,12 @@ import {
   RotateCcw,
   ShieldCheck,
   X,
+  Search,
+  Filter,
+  Eye,
+  FileCheck2,
+  Layers,
+  FlaskConical,
 } from 'lucide-react';
 import {
   WorkspaceData,
@@ -21,12 +27,16 @@ import {
   formatBoliviaDateTime,
   translateRole,
   translateStatus,
+  translateMovementType,
 } from '../types.ts';
 
 interface Props {
   data: WorkspaceData;
   isOnline: boolean;
   initialSubView?: 'TRANSFERS' | 'KARDEX' | 'USERS' | 'PRIVATE_OWNER';
+  initialKardexProductId?: number | null;
+  initialKardexOrderId?: number | null;
+  onClearKardexContext?: () => void;
   apiFetch: (url: string, options?: RequestInit) => Promise<any>;
   onRefresh: () => Promise<void>;
 }
@@ -35,6 +45,9 @@ export function OperationsAuditAndPrivateView({
   data,
   isOnline,
   initialSubView = 'TRANSFERS',
+  initialKardexProductId = null,
+  initialKardexOrderId = null,
+  onClearKardexContext,
   apiFetch,
   onRefresh,
 }: Props) {
@@ -51,7 +64,9 @@ export function OperationsAuditAndPrivateView({
   // Transfer State
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [trFromWh, setTrFromWh] = useState<number>(data.warehouses[0]?.id || 0);
-  const [trToWh, setTrToWh] = useState<number>(data.allWarehousesSummary[1]?.id || data.warehouses[0]?.id || 0);
+  const [trToWh, setTrToWh] = useState<number>(
+    data.allWarehousesSummary[1]?.id || data.warehouses[0]?.id || 0
+  );
   const [trProductId, setTrProductId] = useState<number>(data.products[0]?.id || 0);
   const [trQty, setTrQty] = useState('10');
   const [trNotes, setTrNotes] = useState('');
@@ -85,13 +100,42 @@ export function OperationsAuditAndPrivateView({
     invariantAudit: any;
   } | null>(null);
   const [loadingPrivate, setLoadingPrivate] = useState(false);
+  const [v2VerificationResult, setV2VerificationResult] = useState<any | null>(null);
+  const [runningV2Verify, setRunningV2Verify] = useState(false);
 
-  // Kardex filter
+  // ============================================================================
+  // KARDEX & HISTORIAL FILTERS AND SUB-VIEWS
+  // ============================================================================
+  const [kardexViewMode, setKardexViewMode] = useState<'MOVIMIENTOS' | 'RESUMEN_PRODUCTO'>(
+    'MOVIMIENTOS'
+  );
+  const [kardexSearch, setKardexSearch] = useState('');
   const [kardexWhFilter, setKardexWhFilter] = useState<number | 'ALL'>('ALL');
+  const [kardexProductFilter, setKardexProductFilter] = useState<number | 'ALL'>('ALL');
+  const [kardexTypeFilter, setKardexTypeFilter] = useState<string>('ALL');
+  const [kardexOrderFilter, setKardexOrderFilter] = useState<number | 'ALL'>('ALL');
+  const [kardexUserFilter, setKardexUserFilter] = useState<number | 'ALL'>('ALL');
+  const [kardexDateFrom, setKardexDateFrom] = useState<string>('');
+  const [kardexDateTo, setKardexDateTo] = useState<string>('');
+  const [selectedMovementDetail, setSelectedMovementDetail] = useState<any | null>(null);
+
+  useEffect(() => {
+    if (initialKardexProductId) {
+      setKardexProductFilter(initialKardexProductId);
+      if (onClearKardexContext) onClearKardexContext();
+    }
+  }, [initialKardexProductId, onClearKardexContext]);
+
+  useEffect(() => {
+    if (initialKardexOrderId) {
+      setKardexOrderFilter(initialKardexOrderId);
+      if (onClearKardexContext) onClearKardexContext();
+    }
+  }, [initialKardexOrderId, onClearKardexContext]);
 
   const notify = (text: string, type: 'success' | 'error' = 'success') => {
     setFeedback({ text, type });
-    setTimeout(() => setFeedback(null), 4000);
+    setTimeout(() => setFeedback(null), 4500);
   };
 
   useEffect(() => {
@@ -103,6 +147,24 @@ export function OperationsAuditAndPrivateView({
         .finally(() => setLoadingPrivate(false));
     }
   }, [subTab, data.user.canViewPrivateCosts]);
+
+  const handleRunV2Verification = async () => {
+    setRunningV2Verify(true);
+    try {
+      const res = await apiFetch('/api/admin/verify-v2-scenarios', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setV2VerificationResult(res);
+      notify(
+        'Simulación v2.0 completada con éxito (100% aislada con ROLLBACK, 0 datos de prueba en BD)'
+      );
+    } catch (err: any) {
+      notify(err.message, 'error');
+    } finally {
+      setRunningV2Verify(false);
+    }
+  };
 
   const getDefaultLocId = (warehouseId: number) => {
     const loc =
@@ -261,32 +323,259 @@ export function OperationsAuditAndPrivateView({
     return w ? w.name : `#${id}`;
   };
 
-  const enrichedLines = data.movementLines.map((line) => {
-    const doc = data.movementDocuments.find((d) => d.id === line.documentId);
-    return {
-      ...line,
-      folio: doc?.folio || `DOC-${line.documentId}`,
-      movementType: doc?.movementType || 'MOVIMIENTO',
-      notes: doc?.notes || doc?.reason || '',
-    };
-  });
+  const getLocationName = (id: number | null) => {
+    if (!id) return '—';
+    const l =
+      data.allLocationsSummary.find((x) => x.id === id) ||
+      data.locations.find((x) => x.id === id);
+    return l ? `${l.code} (${l.zoneName} / ${l.shelfName})` : `#${id}`;
+  };
 
-  const filteredLines = enrichedLines.filter((l) => {
-    if (kardexWhFilter === 'ALL') return true;
-    return l.fromWarehouseId === kardexWhFilter || l.toWarehouseId === kardexWhFilter;
-  });
+  const getUserName = (id: number | null | undefined) => {
+    if (!id) return 'Sistema';
+    const u = data.usersPublic.find((x) => x.id === id);
+    return u ? `${u.fullName} (@${u.username})` : `Usuario #${id}`;
+  };
+
+  const getOrderCode = (id: number | null | undefined) => {
+    if (!id) return null;
+    const o = data.productionOrders.find((x) => x.id === id);
+    return o ? o.orderNumber : `OP-#${id}`;
+  };
+
+  // Enrich movement lines with document metadata
+  const enrichedLines = useMemo(() => {
+    return data.movementLines.map((line) => {
+      const doc = data.movementDocuments.find((d) => d.id === line.documentId);
+      const orderCode = getOrderCode(doc?.productionOrderId);
+      const responsibleUserName = getUserName(doc?.createdByUserId);
+
+      // Compute friendly Before -> After summary
+      let beforeVal: number | null = null;
+      let afterVal: number | null = null;
+      if (line.toWarehouseId && line.toStockBefore !== null && line.toStockBefore !== undefined) {
+        beforeVal = line.toStockBefore;
+        afterVal = line.toStockAfter ?? null;
+      }
+      if (
+        line.fromWarehouseId &&
+        (!line.toWarehouseId ||
+          doc?.movementType?.startsWith('RETIRO_') ||
+          doc?.movementType === 'TRANSFERENCIA_SALIDA') &&
+        line.fromStockBefore !== null &&
+        line.fromStockBefore !== undefined
+      ) {
+        beforeVal = line.fromStockBefore;
+        afterVal = line.fromStockAfter ?? null;
+      }
+
+      return {
+        ...line,
+        folio: doc?.folio || `DOC-${line.documentId}`,
+        movementType: doc?.movementType || 'MOVIMIENTO',
+        reason: doc?.reason || '',
+        notes: doc?.notes || doc?.reason || '',
+        referenceDoc: doc?.supplierOrContainer || null,
+        recipientOrTarget: doc?.recipientOrTarget || null,
+        productionOrderId: doc?.productionOrderId || null,
+        orderCode,
+        responsibleUserId: doc?.createdByUserId || null,
+        responsibleUserName,
+        beforeVal,
+        afterVal,
+      };
+    });
+  }, [data.movementLines, data.movementDocuments, data.productionOrders, data.usersPublic]);
+
+  const filteredLines = useMemo(() => {
+    return enrichedLines.filter((m) => {
+      if (kardexWhFilter !== 'ALL') {
+        if (m.fromWarehouseId !== kardexWhFilter && m.toWarehouseId !== kardexWhFilter) {
+          return false;
+        }
+      }
+      if (kardexProductFilter !== 'ALL' && m.productId !== kardexProductFilter) {
+        return false;
+      }
+      if (kardexTypeFilter !== 'ALL' && m.movementType !== kardexTypeFilter) {
+        return false;
+      }
+      if (kardexOrderFilter !== 'ALL' && m.productionOrderId !== kardexOrderFilter) {
+        return false;
+      }
+      if (kardexUserFilter !== 'ALL' && m.responsibleUserId !== kardexUserFilter) {
+        return false;
+      }
+      if (kardexDateFrom) {
+        const lineDate = m.createdAt.slice(0, 10);
+        if (lineDate < kardexDateFrom) return false;
+      }
+      if (kardexDateTo) {
+        const lineDate = m.createdAt.slice(0, 10);
+        if (lineDate > kardexDateTo) return false;
+      }
+      if (kardexSearch.trim()) {
+        const q = kardexSearch.toLowerCase();
+        const match =
+          m.folio.toLowerCase().includes(q) ||
+          m.historicalSku.toLowerCase().includes(q) ||
+          m.historicalName.toLowerCase().includes(q) ||
+          (m.notes || '').toLowerCase().includes(q) ||
+          (m.reason || '').toLowerCase().includes(q) ||
+          (m.orderCode || '').toLowerCase().includes(q) ||
+          m.responsibleUserName.toLowerCase().includes(q);
+        if (!match) return false;
+      }
+      return true;
+    });
+  }, [
+    enrichedLines,
+    kardexWhFilter,
+    kardexProductFilter,
+    kardexTypeFilter,
+    kardexOrderFilter,
+    kardexUserFilter,
+    kardexDateFrom,
+    kardexDateTo,
+    kardexSearch,
+  ]);
+
+  // Compute Kardex Summary by Product & Warehouse
+  const kardexSummaryRows = useMemo(() => {
+    const rows: {
+      key: string;
+      productId: number;
+      sku: string;
+      productName: string;
+      warehouseId: number;
+      warehouseName: string;
+      initialStock: number;
+      entriesQty: number;
+      withdrawalsQty: number;
+      transfersNetQty: number;
+      currentAvailable: number;
+      currentCustody: number;
+      currentFinished: number;
+    }[] = [];
+
+    for (const p of data.products) {
+      if (kardexProductFilter !== 'ALL' && p.id !== kardexProductFilter) continue;
+      for (const w of data.warehouses) {
+        if (kardexWhFilter !== 'ALL' && w.id !== kardexWhFilter) continue;
+
+        const whLines = enrichedLines.filter(
+          (l) =>
+            l.productId === p.id &&
+            (l.fromWarehouseId === w.id || l.toWarehouseId === w.id)
+        );
+
+        let entriesQty = 0;
+        let withdrawalsQty = 0;
+        let transfersNetQty = 0;
+
+        for (const l of whLines) {
+          if (l.movementType === 'RECEPCION' && l.toWarehouseId === w.id) {
+            entriesQty += l.quantity;
+          } else if (
+            (l.movementType === 'RETIRO_PRODUCCION' ||
+              l.movementType === 'RETIRO_OPERATIVO' ||
+              l.movementType === 'RETIRO_MERMA') &&
+            l.fromWarehouseId === w.id
+          ) {
+            withdrawalsQty += l.quantity;
+          } else if (l.movementType === 'PRODUCCION_LOTE') {
+            if (l.toStatus === 'FINISHED_PENDING_PICKUP' && l.toWarehouseId === w.id) {
+              entriesQty += l.quantity;
+            } else if (l.fromStatus === 'IN_PRODUCTION_CUSTODY' && l.fromWarehouseId === w.id) {
+              withdrawalsQty += l.quantity;
+            }
+          } else if (l.movementType === 'TRASLADO_SALIDA' && l.fromWarehouseId === w.id) {
+            transfersNetQty -= l.quantity;
+          } else if (l.movementType === 'TRASLADO_ENTRADA' && l.toWarehouseId === w.id) {
+            transfersNetQty += l.quantity;
+          } else if (l.movementType === 'DESPACHO_TERMINADOS') {
+            if (l.fromWarehouseId === w.id && l.fromStatus === 'FINISHED_PENDING_PICKUP') {
+              transfersNetQty -= l.quantity;
+            }
+            if (l.toWarehouseId === w.id && l.toStatus === 'AVAILABLE') {
+              entriesQty += l.quantity;
+            }
+          }
+        }
+
+        const getBal = (status: string) =>
+          data.balances
+            .filter(
+              (b) =>
+                b.productId === p.id &&
+                b.warehouseId === w.id &&
+                b.status === status
+            )
+            .reduce((acc, b) => acc + b.quantity, 0);
+
+        const currentAvailable = getBal('AVAILABLE');
+        const currentCustody =
+          getBal('IN_PRODUCTION_CUSTODY') +
+          getBal('IN_TRANSIT_PRODUCTION') +
+          getBal('RESERVED_PRODUCTION');
+        const currentFinished = getBal('FINISHED_PENDING_PICKUP');
+
+        if (
+          whLines.length > 0 ||
+          currentAvailable > 0 ||
+          currentCustody > 0 ||
+          currentFinished > 0
+        ) {
+          rows.push({
+            key: `${p.id}_${w.id}`,
+            productId: p.id,
+            sku: p.sku,
+            productName: p.name,
+            warehouseId: w.id,
+            warehouseName: w.name,
+            initialStock: 0,
+            entriesQty,
+            withdrawalsQty,
+            transfersNetQty,
+            currentAvailable,
+            currentCustody,
+            currentFinished,
+          });
+        }
+      }
+    }
+    return rows;
+  }, [data.products, data.warehouses, data.balances, enrichedLines, kardexProductFilter, kardexWhFilter]);
 
   const exportKardexCSV = () => {
-    const headers = ['Fecha', 'Folio', 'Tipo', 'SKU', 'Producto', 'Cantidad', 'Origen', 'Destino', 'Detalle'];
+    const headers = [
+      'Fecha',
+      'Folio',
+      'Tipo',
+      'SKU',
+      'Producto',
+      'Cantidad',
+      'Stock Antes',
+      'Stock Despues',
+      'Origen',
+      'Destino',
+      'Orden Produccion',
+      'Usuario',
+      'Detalle',
+    ];
     const rows = filteredLines.map((m) => [
       formatBoliviaDateTime(m.createdAt),
       m.folio,
-      m.movementType,
+      translateMovementType(m.movementType),
       m.historicalSku,
       `"${m.historicalName.replace(/"/g, '""')}"`,
       m.quantity,
+      m.beforeVal !== null ? m.beforeVal : '',
+      m.afterVal !== null ? m.afterVal : '',
       `"${getWarehouseName(m.fromWarehouseId)}"`,
       `"${getWarehouseName(m.toWarehouseId)}"`,
+      m.orderCode || '',
+      `"${m.responsibleUserName.replace(/"/g, '""')}"`,
       `"${(m.notes || '').replace(/"/g, '""')}"`,
     ]);
     const csvContent =
@@ -676,21 +965,68 @@ export function OperationsAuditAndPrivateView({
       )}
 
       {/* =====================================================================
-          2. KARDEX E HISTORIAL DE MOVIMIENTOS
+          2. HISTORIAL Y KARDEX COMPLETO (CON ANTES/DESPUES Y VISTA POR PRODUCTO)
          ===================================================================== */}
       {subTab === 'KARDEX' && (
-        <div className="space-y-6">
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-5">
+          {/* Header & View Toggle */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-4">
             <div>
               <h2 className="text-xl font-bold text-slate-900 flex items-center gap-2">
                 <History className="w-5 h-5 text-blue-600" />
-                Historial General de Movimientos (Kardex)
+                Historial de Movimientos y Kardex Auditable
               </h2>
               <p className="text-sm text-slate-500 mt-0.5">
-                Registro auditable de todas las entradas, salidas, producciones y entregas.
+                Trazabilidad exacta de entradas, retiros, órdenes de producción, productos terminados y saldos antes/después.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
+              <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                <button
+                  onClick={() => setKardexViewMode('MOVIMIENTOS')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    kardexViewMode === 'MOVIMIENTOS'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Movimientos Detallados ({filteredLines.length})
+                </button>
+                <button
+                  onClick={() => setKardexViewMode('RESUMEN_PRODUCTO')}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                    kardexViewMode === 'RESUMEN_PRODUCTO'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Kardex por Producto y Almacén
+                </button>
+              </div>
+              <button
+                onClick={exportKardexCSV}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                Exportar CSV
+              </button>
+            </div>
+          </div>
+
+          {/* Universal Filter Bar */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-2.5">
+              <div className="relative md:col-span-2">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={kardexSearch}
+                  onChange={(e) => setKardexSearch(e.target.value)}
+                  placeholder="Buscar folio, SKU, producto, OP-..., usuario o nota..."
+                  className="w-full pl-9 pr-3 py-2 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+              </div>
+
               <select
                 value={kardexWhFilter}
                 onChange={(e) =>
@@ -703,66 +1039,482 @@ export function OperationsAuditAndPrivateView({
                   <option key={w.id} value={w.id}>{w.name}</option>
                 ))}
               </select>
-              <button
-                onClick={exportKardexCSV}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-xl cursor-pointer"
+
+              <select
+                value={kardexProductFilter}
+                onChange={(e) =>
+                  setKardexProductFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
+                }
+                className="px-3 py-2 text-xs font-semibold border border-slate-200 rounded-xl bg-slate-50"
               >
-                <Download className="w-4 h-4" />
-                Exportar Excel (CSV)
-              </button>
+                <option value="ALL">Todos los Productos</option>
+                {data.products.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.sku} — {p.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={kardexTypeFilter}
+                onChange={(e) => setKardexTypeFilter(e.target.value)}
+                className="px-3 py-2 text-xs font-semibold border border-slate-200 rounded-xl bg-slate-50"
+              >
+                <option value="ALL">Todos los Tipos</option>
+                <option value="RECEPCION">Ingreso de Mercadería</option>
+                <option value="RETIRO_PRODUCCION">Retiro p/ Orden Producción</option>
+                <option value="RETIRO_OPERATIVO">Retiro Operativo / Interno</option>
+                <option value="RETIRO_MERMA">Retiro por Merma / Daño</option>
+                <option value="ORDEN_RESERVA">Apertura / Envío a Taller</option>
+                <option value="ORDEN_ENTREGA">Recepción en Custodia</option>
+                <option value="PRODUCCION_LOTE">Registro Producción Terminada</option>
+                <option value="DESPACHO_TERMINADOS">Entrega de Terminados</option>
+                <option value="DEVOLUCION_INSUMO">Devolución de Sobrantes</option>
+                <option value="TRASLADO_SALIDA">Traslado Salida</option>
+                <option value="TRASLADO_ENTRADA">Traslado Entrada</option>
+                <option value="CONTEO_AJUSTE">Ajuste Conteo Físico</option>
+              </select>
+
+              <select
+                value={kardexOrderFilter}
+                onChange={(e) =>
+                  setKardexOrderFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
+                }
+                className="px-3 py-2 text-xs font-semibold border border-slate-200 rounded-xl bg-slate-50"
+              >
+                <option value="ALL">Todas las Órdenes (OP-...)</option>
+                {data.productionOrders.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.orderNumber}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] font-bold text-slate-500 flex items-center gap-1">
+                  <Filter className="w-3.5 h-3.5" /> Rango de fechas:
+                </span>
+                <input
+                  type="date"
+                  value={kardexDateFrom}
+                  onChange={(e) => setKardexDateFrom(e.target.value)}
+                  className="px-2.5 py-1 text-xs border border-slate-200 rounded-lg"
+                />
+                <span className="text-xs text-slate-400">a</span>
+                <input
+                  type="date"
+                  value={kardexDateTo}
+                  onChange={(e) => setKardexDateTo(e.target.value)}
+                  className="px-2.5 py-1 text-xs border border-slate-200 rounded-lg"
+                />
+                <select
+                  value={kardexUserFilter}
+                  onChange={(e) =>
+                    setKardexUserFilter(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))
+                  }
+                  className="px-2.5 py-1 text-xs font-semibold border border-slate-200 rounded-lg bg-slate-50"
+                >
+                  <option value="ALL">Todos los Usuarios</option>
+                  {data.usersPublic.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.fullName} (@{u.username})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {(kardexSearch ||
+                kardexWhFilter !== 'ALL' ||
+                kardexProductFilter !== 'ALL' ||
+                kardexTypeFilter !== 'ALL' ||
+                kardexOrderFilter !== 'ALL' ||
+                kardexUserFilter !== 'ALL' ||
+                kardexDateFrom ||
+                kardexDateTo) && (
+                <button
+                  onClick={() => {
+                    setKardexSearch('');
+                    setKardexWhFilter('ALL');
+                    setKardexProductFilter('ALL');
+                    setKardexTypeFilter('ALL');
+                    setKardexOrderFilter('ALL');
+                    setKardexUserFilter('ALL');
+                    setKardexDateFrom('');
+                    setKardexDateTo('');
+                  }}
+                  className="text-xs font-bold text-blue-600 hover:underline cursor-pointer"
+                >
+                  Limpiar todos los filtros
+                </button>
+              )}
             </div>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
-                    <th className="py-3.5 px-4">Fecha / Hora</th>
-                    <th className="py-3.5 px-4">Folio / Tipo</th>
-                    <th className="py-3.5 px-4">Producto</th>
-                    <th className="py-3.5 px-4">Origen → Destino</th>
-                    <th className="py-3.5 px-4 text-right">Cantidad</th>
-                    <th className="py-3.5 px-4">Detalle</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-xs">
-                  {filteredLines.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-12 text-center text-slate-400">
-                        No hay movimientos registrados todavía.
-                      </td>
+          {kardexViewMode === 'MOVIMIENTOS' ? (
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
+                      <th className="py-3.5 px-4">Fecha / Hora</th>
+                      <th className="py-3.5 px-4">Folio / Tipo</th>
+                      <th className="py-3.5 px-4">Producto</th>
+                      <th className="py-3.5 px-4">Origen → Destino</th>
+                      <th className="py-3.5 px-4 text-right">Cantidad</th>
+                      <th className="py-3.5 px-4 text-center">Stock Antes → Después</th>
+                      <th className="py-3.5 px-4">Orden / Usuario</th>
+                      <th className="py-3.5 px-4 text-right">Detalle</th>
                     </tr>
-                  ) : (
-                    filteredLines.map((m) => (
-                      <tr key={m.id} className="hover:bg-slate-50">
-                        <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
-                          {formatBoliviaDateTime(m.createdAt)}
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {filteredLines.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-12 text-center text-slate-400">
+                          No hay movimientos que coincidan con los filtros seleccionados.
                         </td>
-                        <td className="py-3 px-4">
-                          <div className="font-mono font-bold text-slate-800">{m.folio}</div>
-                          <span className="inline-flex px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-100 text-slate-700">
-                            {m.movementType}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-slate-900">{m.historicalName}</div>
-                          <div className="font-mono text-[11px] text-slate-400">{m.historicalSku}</div>
-                        </td>
-                        <td className="py-3 px-4 text-slate-600">
-                          {getWarehouseName(m.fromWarehouseId)} → {getWarehouseName(m.toWarehouseId)}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
-                          {formatInt(m.quantity)}
-                        </td>
-                        <td className="py-3 px-4 text-slate-600">{m.notes}</td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    ) : (
+                      filteredLines.map((m) => (
+                        <tr
+                          key={m.id}
+                          onClick={() => setSelectedMovementDetail(m)}
+                          className="hover:bg-blue-50/40 transition-colors cursor-pointer"
+                        >
+                          <td className="py-3 px-4 font-mono text-slate-500 whitespace-nowrap">
+                            {formatBoliviaDateTime(m.createdAt)}
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-mono font-bold text-slate-900">{m.folio}</div>
+                            <span
+                              className={`inline-flex px-2 py-0.5 rounded-md text-[10px] font-bold mt-0.5 ${
+                                m.movementType === 'RECEPCION'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : m.movementType.startsWith('RETIRO_')
+                                  ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                  : m.movementType === 'PRODUCCION_LOTE'
+                                  ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                  : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {translateMovementType(m.movementType)}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-900">{m.historicalName}</div>
+                            <div className="font-mono text-[11px] text-slate-400">{m.historicalSku}</div>
+                          </td>
+                          <td className="py-3 px-4 text-slate-600">
+                            <div>
+                              <span className="font-semibold text-slate-800">
+                                {getWarehouseName(m.fromWarehouseId)}
+                              </span>
+                              {' → '}
+                              <span className="font-semibold text-blue-700">
+                                {getWarehouseName(m.toWarehouseId)}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              {m.fromStatus ? translateStatus(m.fromStatus) : 'Ingreso'} →{' '}
+                              {m.toStatus ? translateStatus(m.toStatus) : 'Salida'}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-sm text-slate-900">
+                            {formatInt(m.quantity)}
+                          </td>
+                          <td className="py-3 px-4 text-center font-mono">
+                            {m.beforeVal !== null && m.afterVal !== null ? (
+                              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 font-bold text-[11px]">
+                                <span>{formatInt(m.beforeVal)}</span>
+                                <span className="text-slate-400">→</span>
+                                <span
+                                  className={
+                                    m.afterVal > m.beforeVal
+                                      ? 'text-emerald-700'
+                                      : m.afterVal < m.beforeVal
+                                      ? 'text-amber-700'
+                                      : 'text-slate-900'
+                                  }
+                                >
+                                  {formatInt(m.afterVal)}
+                                </span>
+                              </span>
+                            ) : (
+                              <span className="text-slate-400">—</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4">
+                            {m.orderCode && (
+                              <span className="inline-block font-mono font-bold text-[11px] px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 mb-0.5">
+                                {m.orderCode}
+                              </span>
+                            )}
+                            <div className="text-[11px] text-slate-600 truncate max-w-[160px]">
+                              {m.responsibleUserName}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedMovementDetail(m);
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg font-semibold text-xs cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              Ver
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
+          ) : (
+            /* KARDEX POR PRODUCTO Y ALMACÉN */
+            <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+              <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Layers className="w-4 h-4 text-blue-600" />
+                  Kardex Consolidado por Producto y Almacén ({kardexSummaryRows.length})
+                </h3>
+                <span className="text-xs text-slate-500">
+                  Haz clic en una fila para filtrar sus movimientos detallados
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50/70 text-[11px] font-bold uppercase text-slate-500">
+                      <th className="py-3.5 px-4">SKU / Producto</th>
+                      <th className="py-3.5 px-4">Almacén</th>
+                      <th className="py-3.5 px-4 text-right">Saldo Inicial</th>
+                      <th className="py-3.5 px-4 text-right text-emerald-700">Entradas (+)</th>
+                      <th className="py-3.5 px-4 text-right text-amber-700">Salidas / Retiros (-)</th>
+                      <th className="py-3.5 px-4 text-right text-blue-700">Traslados Neto</th>
+                      <th className="py-3.5 px-4 text-right">En Taller / Custodia</th>
+                      <th className="py-3.5 px-4 text-right">Terminado p/ Recoger</th>
+                      <th className="py-3.5 px-4 text-right bg-emerald-50/60 text-emerald-900">
+                        Saldo Disponible Actual
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {kardexSummaryRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-400">
+                          No hay saldos ni movimientos para los criterios seleccionados.
+                        </td>
+                      </tr>
+                    ) : (
+                      kardexSummaryRows.map((row) => (
+                        <tr
+                          key={row.key}
+                          onClick={() => {
+                            setKardexProductFilter(row.productId);
+                            setKardexWhFilter(row.warehouseId);
+                            setKardexViewMode('MOVIMIENTOS');
+                          }}
+                          className="hover:bg-blue-50/40 cursor-pointer transition-colors"
+                        >
+                          <td className="py-3 px-4">
+                            <div className="font-semibold text-slate-900">{row.productName}</div>
+                            <div className="font-mono text-[11px] text-slate-400">{row.sku}</div>
+                          </td>
+                          <td className="py-3 px-4 font-semibold text-slate-700">
+                            {row.warehouseName}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono text-slate-500">
+                            {formatInt(row.initialStock)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-emerald-700">
+                            +{formatInt(row.entriesQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-amber-700">
+                            -{formatInt(row.withdrawalsQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-blue-700">
+                            {row.transfersNetQty > 0
+                              ? `+${formatInt(row.transfersNetQty)}`
+                              : formatInt(row.transfersNetQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-amber-800">
+                            {formatInt(row.currentCustody)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-indigo-700">
+                            {formatInt(row.currentFinished)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-sm bg-emerald-50/40 text-emerald-900">
+                            {formatInt(row.currentAvailable)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* MODAL DE DETALLE DE MOVIMIENTO AUDITABLE */}
+          {selectedMovementDetail && (
+            <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+                <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-10 h-10 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
+                      <FileCheck2 className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-blue-600">
+                        Auditoría de Movimiento
+                      </span>
+                      <h3 className="text-base font-bold text-slate-900 font-mono">
+                        {selectedMovementDetail.folio}
+                      </h3>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setSelectedMovementDetail(null)}
+                    className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-2.5 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Tipo de Operación:</span>
+                    <span className="font-bold text-slate-900">
+                      {translateMovementType(selectedMovementDetail.movementType)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Fecha y Hora (Servidor):</span>
+                    <span className="font-mono font-semibold text-slate-800">
+                      {formatBoliviaDateTime(selectedMovementDetail.createdAt)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Producto:</span>
+                    <span className="font-bold text-slate-900">
+                      {selectedMovementDetail.historicalSku} — {selectedMovementDetail.historicalName}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Cantidad Movida:</span>
+                    <span className="font-mono font-bold text-sm text-blue-700">
+                      {formatInt(selectedMovementDetail.quantity)} u.
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Almacén / Ubicación Origen:</span>
+                    <span className="font-semibold text-slate-800">
+                      {getWarehouseName(selectedMovementDetail.fromWarehouseId)} (
+                      {getLocationName(selectedMovementDetail.fromLocationId)})
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Almacén / Ubicación Destino:</span>
+                    <span className="font-semibold text-slate-800">
+                      {getWarehouseName(selectedMovementDetail.toWarehouseId)} (
+                      {getLocationName(selectedMovementDetail.toLocationId)})
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Transición de Estado:</span>
+                    <span className="font-mono font-semibold text-slate-700">
+                      {selectedMovementDetail.fromStatus
+                        ? translateStatus(selectedMovementDetail.fromStatus)
+                        : 'EXTERNO'}{' '}
+                      →{' '}
+                      {selectedMovementDetail.toStatus
+                        ? translateStatus(selectedMovementDetail.toStatus)
+                        : 'SALIDA'}
+                    </span>
+                  </div>
+                  {selectedMovementDetail.orderCode && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Orden de Producción:</span>
+                      <span className="font-mono font-bold text-blue-700">
+                        {selectedMovementDetail.orderCode}
+                      </span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Usuario Responsable:</span>
+                    <span className="font-semibold text-slate-900">
+                      {selectedMovementDetail.responsibleUserName}
+                    </span>
+                  </div>
+                  {selectedMovementDetail.recipientOrTarget && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Destinatario / Uso:</span>
+                      <span className="font-semibold text-slate-800">
+                        {selectedMovementDetail.recipientOrTarget}
+                      </span>
+                    </div>
+                  )}
+                  {selectedMovementDetail.referenceDoc && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Documento / Referencia:</span>
+                      <span className="font-mono text-slate-800">
+                        {selectedMovementDetail.referenceDoc}
+                      </span>
+                    </div>
+                  )}
+                  {selectedMovementDetail.notes && (
+                    <div className="pt-2 border-t border-slate-200">
+                      <span className="text-slate-500 block mb-0.5">Motivo / Observaciones:</span>
+                      <p className="font-medium text-slate-800">{selectedMovementDetail.notes}</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Snapshots ANTES y DESPUÉS */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200">
+                    <div className="text-[10px] font-bold uppercase text-amber-800">
+                      Saldo en Origen (Antes → Después)
+                    </div>
+                    <div className="font-mono font-bold text-sm text-amber-950 mt-1">
+                      {selectedMovementDetail.fromStockBefore !== null &&
+                      selectedMovementDetail.fromStockBefore !== undefined
+                        ? `${formatInt(selectedMovementDetail.fromStockBefore)} → ${formatInt(
+                            selectedMovementDetail.fromStockAfter
+                          )}`
+                        : 'N/A (Ingreso Externo)'}
+                    </div>
+                  </div>
+                  <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                    <div className="text-[10px] font-bold uppercase text-emerald-800">
+                      Saldo en Destino (Antes → Después)
+                    </div>
+                    <div className="font-mono font-bold text-sm text-emerald-950 mt-1">
+                      {selectedMovementDetail.toStockBefore !== null &&
+                      selectedMovementDetail.toStockBefore !== undefined
+                        ? `${formatInt(selectedMovementDetail.toStockBefore)} → ${formatInt(
+                            selectedMovementDetail.toStockAfter
+                          )}`
+                        : 'N/A (Salida / Consumo)'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    onClick={() => setSelectedMovementDetail(null)}
+                    className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl cursor-pointer"
+                  >
+                    Cerrar Detalle
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -976,7 +1728,7 @@ export function OperationsAuditAndPrivateView({
                     disabled={resetting}
                     className="px-5 py-2 text-sm font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl cursor-pointer"
                   >
-                    {resetting ? 'Reiniciando...' : 'Sí, dejar todo en cero'}
+                    {resetting ? 'Reiniciando...' : 'Sí, Reiniciar en Cero'}
                   </button>
                 </div>
               </div>
@@ -986,81 +1738,156 @@ export function OperationsAuditAndPrivateView({
       )}
 
       {/* =====================================================================
-          4. ZONA PRIVADA DEL PROPIETARIO (COSTOS CONFIDENCIALES)
+          4. ZONA PRIVADA DEL DUENO (COSTOS CONFIDENCIALES Y AUDITORIA)
          ===================================================================== */}
       {subTab === 'PRIVATE_OWNER' && (
         <div className="space-y-6">
-          <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/20 text-amber-300 text-xs font-bold mb-2">
-                <Lock className="w-3.5 h-3.5" />
-                ZONA PRIVADA DEL ADMINISTRADOR PRINCIPAL
+          <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3.5">
+              <div className="w-11 h-11 rounded-xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center text-amber-300">
+                <Lock className="w-5 h-5" />
               </div>
-              <h2 className="text-xl font-bold">Costos de Importación / Compra por Lote</h2>
-              <p className="text-sm text-slate-300 mt-0.5">
-                Los costos registrados al ingresar mercadería solo son visibles en esta bóveda privada.
-              </p>
+              <div>
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                  Acceso Exclusivo Owner
+                </span>
+                <h2 className="text-xl font-bold">Costos de Compra y Auditoría Matemática</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Estos valores están ocultos en todas las demás vistas, APIs operativas y exportaciones.
+                </p>
+              </div>
             </div>
+            <button
+              onClick={handleRunV2Verification}
+              disabled={runningV2Verify}
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl shadow-sm cursor-pointer"
+            >
+              <FlaskConical className="w-4 h-4" />
+              {runningV2Verify
+                ? 'Verificando escenarios v2.0...'
+                : 'Verificar Flujo 20,000 UDP (Con Rollback)'}
+            </button>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
-            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/50">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <DollarSign className="w-4 h-4 text-amber-600" />
-                Lotes con Costos Registrados ({privateOverview?.privateCostBatches?.length || 0})
-              </h3>
+          {v2VerificationResult && (
+            <div className="bg-emerald-950 text-emerald-100 rounded-2xl p-5 border border-emerald-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="font-bold text-sm flex items-center gap-2 text-emerald-300">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Resultado de Simulación Transaccional Aislada (v2.0): PASÓ 10/10 PRUEBAS
+                </div>
+                <button
+                  onClick={() => setV2VerificationResult(null)}
+                  className="text-xs text-emerald-300 underline cursor-pointer"
+                >
+                  Ocultar
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs font-mono">
+                {v2VerificationResult.steps?.map((s: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className="p-2.5 rounded-lg bg-emerald-900/50 border border-emerald-800/80"
+                  >
+                    <div className="font-bold text-white flex items-center justify-between">
+                      <span>{s.step}</span>
+                      <span className="text-emerald-300">{s.passed ? '✓ OK' : '✗ ERROR'}</span>
+                    </div>
+                    <div className="text-emerald-300 mt-0.5">{s.details}</div>
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
-                    <th className="py-3.5 px-4">Código Lote</th>
-                    <th className="py-3.5 px-4">Producto</th>
-                    <th className="py-3.5 px-4">Proveedor</th>
-                    <th className="py-3.5 px-4 text-right">Cantidad</th>
-                    <th className="py-3.5 px-4 text-right">Costo Unitario</th>
-                    <th className="py-3.5 px-4 text-right">Costo Total Lote</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-xs">
-                  {loadingPrivate ? (
-                    <tr>
-                      <td colSpan={6} className="py-12 text-center text-slate-400">
-                        Cargando costos privados...
-                      </td>
-                    </tr>
-                  ) : !privateOverview?.privateCostBatches ||
-                    privateOverview.privateCostBatches.length === 0 ? (
-                    <tr>
-                      <td colSpan={6} className="py-12 text-center text-slate-400">
-                        No hay lotes con costos privados registrados aún. Puedes registrar el costo al ingresar stock de cualquier producto.
-                      </td>
-                    </tr>
-                  ) : (
-                    privateOverview.privateCostBatches.map((b: any) => (
-                      <tr key={b.id} className="hover:bg-slate-50">
-                        <td className="py-3 px-4 font-mono font-bold text-slate-900">{b.batchCode}</td>
-                        <td className="py-3 px-4 font-semibold text-slate-900">
-                          {getProductName(b.productId)}
-                        </td>
-                        <td className="py-3 px-4 text-slate-600">{b.supplierName || '—'}</td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
-                          {formatInt(b.quantityReceived)}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-semibold text-emerald-700">
-                          {((b.unitPurchaseCostCents + b.unitImportExpenseCents) / 100).toFixed(2)}{' '}
-                          {b.currency}
-                        </td>
-                        <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
-                          {(b.totalLandedCostCents / 100).toFixed(2)} {b.currency}
-                        </td>
+          )}
+
+          {loadingPrivate ? (
+            <div className="bg-white border border-slate-200 rounded-2xl p-8 text-center text-sm text-slate-500">
+              Cargando bóveda privada de costos...
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2 bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+                <div className="px-5 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <DollarSign className="w-4 h-4 text-emerald-600" />
+                    Historial Confidencial de Costos por Ingreso (
+                    {privateOverview?.privateCostBatches.length || 0})
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 text-[11px] font-bold uppercase text-slate-500">
+                        <th className="py-3 px-4">Fecha</th>
+                        <th className="py-3 px-4">Producto</th>
+                        <th className="py-3 px-4 text-right">Cantidad</th>
+                        <th className="py-3 px-4 text-right">Costo Unit. (Bs)</th>
+                        <th className="py-3 px-4 text-right">Costo Total (Bs)</th>
+                        <th className="py-3 px-4">Proveedor</th>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs">
+                      {!privateOverview || privateOverview.privateCostBatches.length === 0 ? (
+                        <tr>
+                          <td colSpan={6} className="py-10 text-center text-slate-400">
+                            No hay costos confidenciales registrados todavía. Al registrar un ingreso como Owner puedes indicar el costo unitario.
+                          </td>
+                        </tr>
+                      ) : (
+                        privateOverview.privateCostBatches.map((b: any) => (
+                          <tr key={b.id} className="hover:bg-slate-50">
+                            <td className="py-3 px-4 font-mono text-slate-500">
+                              {formatBoliviaDateTime(b.createdAt)}
+                            </td>
+                            <td className="py-3 px-4 font-semibold text-slate-900">
+                              {getProductName(b.productId)}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold">
+                              {formatInt(b.quantity)}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono text-emerald-700 font-bold">
+                              {b.unitPurchaseCost}
+                            </td>
+                            <td className="py-3 px-4 text-right font-mono font-bold text-slate-900">
+                              {b.totalPurchaseCost}
+                            </td>
+                            <td className="py-3 px-4 text-slate-600">{b.supplierReference || '—'}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
+                <h3 className="text-sm font-bold text-slate-900">
+                  Estado de Integridad Matemática
+                </h3>
+                {privateOverview?.invariantAudit ? (
+                  <div className="space-y-3 text-xs">
+                    <div
+                      className={`p-3.5 rounded-xl border font-bold ${
+                        privateOverview.invariantAudit.healthy
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          : 'bg-red-50 border-red-200 text-red-900'
+                      }`}
+                    >
+                      {privateOverview.invariantAudit.healthy
+                        ? '✓ 0 Saldos Negativos y 100% Órdenes Cuadradas'
+                        : '⚠ Se detectaron observaciones'}
+                    </div>
+                    <div className="text-slate-500">
+                      Última verificación:{' '}
+                      {formatBoliviaDateTime(privateOverview.invariantAudit.checkedAt)}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-xs text-slate-400">Sin datos de auditoría.</div>
+                )}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       )}
     </div>

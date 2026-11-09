@@ -1,0 +1,439 @@
+PROMPT MAESTRO DE MODIFICACIONES PARA GOOGLE AI STUDIO
+APLICACIÓN WEB DE INVENTARIO DE INSUMOS Y ÓRDENES DE PRODUCCIÓN
+Versión: 2.0 | Noviembre de 2026 | Idioma: español
+
+IMPORTANTE: ESTE DOCUMENTO SOLICITA MODIFICACIONES A UNA APLICACIÓN WEB QUE YA SE ESTÁ DESARROLLANDO. NO ES UNA SOLICITUD PARA CREAR OTRA APLICACIÓN DESDE CERO.
+
+================================================================================
+00. INSTRUCCIÓN PRINCIPAL Y ORDEN DE PRIORIDADES
+================================================================================
+
+Actúa como ingeniero de software full-stack senior, especialista en sistemas de inventario y trazabilidad, arquitecto de bases de datos transaccionales y diseñador de interfaces prácticas para personal de almacén. Primero inspecciona el código REAL, las rutas, módulos, componentes, API, esquemas de base de datos, permisos, reglas de stock y flujos actualmente existentes en esta aplicación. Identifica qué está construido y qué cambios mínimos y seguros hacen falta; no supongas que el proyecto está vacío. Implementa las modificaciones indicadas en este documento de manera INTEGRADA y FUNCIONAL, no únicamente visual. Conserva las funcionalidades válidas existentes, la base de datos real y las referencias históricas. No reemplaces módulos completos ni realices refactorizaciones amplias sin necesidad técnica demostrada.
+
+OBJETIVO DEL CAMBIO: simplificar la aplicación para que su núcleo sea un INVENTARIO DE INSUMOS con ingresos y retiros manuales, justificados y auditados; un módulo de NUEVA ORDEN DE PRODUCCIÓN para que el propietario entregue UDP o memorias al personal; un flujo para registrar en qué productos terminados se transformaron y qué insumos se emplearon; y un HISTORIAL/KARDEX claro, agradable y confiable. Debe ser rápido para trabajadores y seguro para el dueño. Se prioriza la integridad de cantidades por encima de cualquier efecto visual.
+
+REGLA FUNDAMENTAL: ELIMINAR DEL FLUJO ACTIVO Y DEL MENÚ LA SECCIÓN "RECETAS DE ENSAMBLAJE". No queremos obligar al personal a crear ni administrar recetas o listas de materiales por modelo. La producción será flexible y se justificará mediante insumos seleccionados, cantidades realmente retiradas y productos terminados registrados en cada orden. Si existen datos antiguos de recetas, NO los borres ni destruyas las referencias históricas; desacopla su utilización y oculta la interfaz. Examina dependencias antes de retirarla. No permitir que antiguas rutinas de recetas descuenten stock en paralelo al nuevo sistema.
+
+PRIORIDADES, EN ESTE ORDEN:
+1. Integridad y trazabilidad real de existencias, ingresos, retiros, asignaciones, consumos y recepciones.
+2. Flujo de trabajo sencillo, intuitivo, con pocos clics y sin duplicar operaciones.
+3. Permisos estrictos del personal por almacén; separación de información privada.
+4. Rendimiento, claridad de la interfaz, fotografía de cada insumo y un buen Kardex.
+5. Pruebas automatizadas y verificación de cálculo, concurrencia, errores de red y cambios existentes.
+
+NO inventes saldo de stock, usuarios, órdenes, recepciones o movimientos. Nunca hagas operaciones de prueba con datos ficticios en una base de datos de producción. No publiques una versión modificada ni migres datos reales sin autorización explícita del dueño. Cuando la implementación esté lista, entrega un informe con los cambios, pruebas, riesgos pendientes y pasos seguros de despliegue. No declares "seguro al 100 %" ni "sin errores"; demuestra los controles y resultados.
+
+================================================================================
+01. CONTEXTO DEL NEGOCIO: QUÉ SE QUIERE CONTROLAR
+================================================================================
+
+La empresa almacena insumos de ensamblaje/empaque de productos tecnológicos. Algunos ejemplos:
+- Chips o módulos UDP para USB de 8 GB, 16 GB y 32 GB; un mismo tipo de UDP puede terminar en varias marcas, modelos, cases y empaques.
+- Memorias microSD ya identificadas por marca, modelo y capacidad.
+- Adaptadores SD genéricos utilizables en varias capacidades.
+- Empaques: el papel impreso y su blíster/plástico forman UN SOLO INSUMO para fines del inventario; no descomponerlos innecesariamente.
+- Cases o carcasas USB de metal, goma/silicona o plástico, con modelos y colores diferentes.
+- Otros insumos nuevos que el dueño necesite registrar en el futuro.
+
+Se usan varios almacenes configurables (por ejemplo, Sencata, Villa Dolores y Puente Bolivia), con secciones, cuartos, estantes o ubicaciones. Cada usuario operativo solo debe acceder a los almacenes que el administrador le autorice. La aplicación NO es un POS: no incluir ventas, cobros, caja ni precios al público. Los costos de compra, pólizas y márgenes, si existen en un módulo privado, nunca se mostrarán al personal ni se devolverán en sus respuestas de API.
+
+El propietario necesita responder con precisión: ¿cuántos empaques tengo?, ¿dónde están?, ¿quién retiró 5.000 unidades?, ¿para qué orden de producción se retiraron?, ¿cuántos UDP se entregaron al encargado?, ¿qué USB de marca/modelo/capacidad fabricó?, ¿qué materiales usó?, ¿qué cantidad se recibió terminada?, ¿qué quedó sin devolver o pendiente?, ¿cuándo ocurrió cada movimiento?
+
+================================================================================
+02. NUEVO MENÚ Y SIMPLIFICACIÓN DE FUNCIONALIDADES
+================================================================================
+
+Reorganiza la navegación para que resulte clara. Propuesta de menú principal, ajustable a la estructura existente:
+- RESUMEN: totales y alertas útiles sin saturación.
+- INVENTARIO Y PRODUCTOS: alta/edición autorizada de insumos, fotografía, existencias por almacén, INGRESAR y RETIRAR.
+- ÓRDENES DE PRODUCCIÓN: botón "Nueva orden de producción", asignación/entrega de UDP y microSD, recepción por trabajador, insumos relacionados, productos obtenidos, pendientes y cierre.
+- PRODUCTOS TERMINADOS / RECOGIDAS: existencias terminadas pendientes de entrega y recepción por el dueño o encargado autorizado. Si el flujo es más simple dentro de cada orden, esta opción puede ser una pestaña de Órdenes en lugar de un menú independiente.
+- HISTORIAL Y KARDEX: todos los movimientos, búsqueda, filtros, comprobantes y auditoría.
+- ALMACENES Y UBICACIONES: configuración restringida y búsqueda física.
+- USUARIOS Y PERMISOS: solo para administrador.
+- CONFIGURACIÓN: solo los ajustes estrictamente necesarios.
+
+Quitar "Recetas de ensamblaje" de menús, formularios, accesos rápidos, acciones y rutas de uso corriente. No sustituirla por otro módulo complejo de recetas. Evitar duplicar pantallas con nombres diferentes para la misma operación. Mantener los nombres de botones expresivos y en español, para que los entienda un empleado sin formación técnica.
+
+================================================================================
+03. INVENTARIO Y PRODUCTOS: LA PANTALLA CENTRAL
+================================================================================
+
+Necesitamos una pantalla muy cómoda para crear, identificar, consultar, ingresar y retirar insumos.
+
+Cada ficha de insumo debe permitir, según el permiso:
+- Código interno o SKU único e inmutable una vez utilizado en movimientos; descripción editable con auditoría.
+- Nombre corto y nombre/descripción detallada.
+- Categoría: UDP, microSD, adaptador, empaque/blíster, case, otros.
+- Marca, modelo, capacidad (8, 16, 32, 64, 128 GB u otros), color, material, variante; mostrar únicamente los campos aplicables al tipo elegido.
+- UNA o varias fotografías, con foto principal destacada y vista ampliada. Permitir subir, sustituir y ordenar imágenes con autorización; conservar referencias históricas cuando corresponda.
+- Unidad de medida (por defecto, unidades enteras), estado activo/inactivo y ubicación principal sugerida.
+- Almacenes y ubicaciones donde existe stock, con saldo por cada ubicación.
+- Stock disponible y, cuando aplique, stock entregado a producción, consumido, en tránsito y reservado, sin confundirlos.
+- Nivel mínimo de reposición configurable y aviso discreto de stock bajo (solo si es útil).
+
+Interfaz de listado:
+- Barra de búsqueda visible por código, nombre, marca, capacidad, modelo y descripción.
+- Filtros fáciles por almacén, categoría y capacidad.
+- Miniatura de la foto del producto a la izquierda, nombre legible, código, ubicación, cantidad disponible y acciones.
+- Botones bien diferenciados "Ingresar" y "Retirar" en cada fila, más "Ver historial" y "Ver detalle".
+- En móviles, tarjetas compactas con descripción completa al expandir, y botones grandes que puedan usarse con el dedo; no cortar nombres críticos ni esconder cantidades.
+- En PC, tabla limpia con columnas elegibles, ordenación y paginación o carga eficiente.
+- La cantidad que ve el usuario debe proceder del servidor; actualizarla tras confirmar el movimiento. No mostrar un supuesto movimiento exitoso antes de la confirmación real.
+
+Alta del producto: SOLO el administrador o quienes tengan permiso específico podrán crear o modificar el catálogo. Los empleados normales NO deben poder cambiar el SKU, la descripción identificadora, las fotos oficiales, los almacenes ni el stock inicial arbitrariamente. Si se otorga a algunos responsables permiso para crear insumos, hacerlo de manera explícita y auditada. Un "producto nuevo" no debe crear stock misterioso: el ingreso inicial requiere documento de movimiento y origen.
+
+================================================================================
+04. BOTÓN "INGRESAR": AUMENTAR STOCK CON JUSTIFICACIÓN
+================================================================================
+
+Al pulsar INGRESAR en un insumo:
+1. Mostrar foto, SKU, descripción y ubicación del producto.
+2. Elegir almacén y ubicación autorizados.
+3. Introducir cantidad positiva ENTERA (ej.: 100, 1.000, 5.000).
+4. Elegir motivo: recepción de mercancía, devolución de insumos no utilizados, regularización autorizada u otro motivo permitido.
+5. Incluir referencia opcional (contenedor, nota de entrega, proveedor, lote o documento) y observación.
+6. Mostrar resumen "Saldo anterior / Ingreso / Saldo resultante" como vista previa.
+7. Confirmar una sola vez. El servidor valida permisos y existencia del producto, registra el movimiento y actualiza el saldo de forma atómica.
+8. Mostrar comprobante con folio único, fecha y hora del servidor, usuario, cantidad, almacén, ubicación y motivo.
+
+No permitir doble ingreso por doble clic, refresco del navegador o repetición de petición; utilizar identificador único de operación/idempotencia. Las devoluciones provenientes de una orden deben referenciar la entrega o retiro original: no aceptar reingresos libres que dupliquen stock.
+
+================================================================================
+05. BOTÓN "RETIRAR": FUNCIONALIDAD PRINCIPAL SOLICITADA
+================================================================================
+
+AGREGAR UN BOTÓN "RETIRAR" JUNTO A "INGRESAR" en la pantalla INVENTARIO Y PRODUCTOS y, cuando sea útil, también dentro del detalle del insumo. El personal autorizado debe poder retirar de forma sencilla y rápida 100, 1.000, 5.000 o cualquier cantidad válida disponible de su almacén.
+
+Al pulsar RETIRAR abrir un formulario claro, sin navegación confusa:
+- Foto grande o miniatura, SKU y nombre del insumo (para evitar confusiones entre empaques o colores).
+- Almacén y ubicación de origen; restringidos a los del usuario.
+- Existencia disponible ACTUAL, consultada al servidor.
+- Cantidad a retirar (entero positivo); prohibir 0, negativos, decimales cuando la unidad es "unidades", texto y valores superiores al saldo permitido.
+- Motivo/DESTINO obligatorio con opciones sencillas:
+  A) "Para una orden de producción" (flujo habitual): seleccionar la orden existente a la que corresponde y especificar para qué producto o modelo se usa, en un campo corto de justificación.
+  B) "Consumo operativo / otro uso" SOLO si el dueño habilita este permiso, con motivo y destinatario obligatorios.
+  C) "Transferencia a otro almacén" si el sistema ya cuenta con transferencia auditada: utilizar esa operación y no fingir un consumo.
+  D) "Merma/daño" exclusivamente si existe permiso especial y aprobación correspondiente.
+- Observación, usuario responsable y fecha del servidor (no editables por el trabajador), folio único.
+- Vista previa: stock disponible anterior, cantidad a retirar y stock disponible restante.
+- Botón final "Confirmar retiro" y comprobante.
+
+EXIGIR JUSTIFICACIÓN: si se elige producción, el trabajador DEBE asociar el retiro a una orden válida y a la finalidad/modelo/producto terminado previsto, o registrar una observación precisa si el modelo todavía está por definirse. No permitir retiros de producción anónimos o sin referencia. El personal puede seleccionar entre órdenes abiertas de SU almacén/área a las que esté asignado, nunca órdenes ajenas.
+
+IMPORTANTE DIFERENCIAR DISPONIBLE, ASIGNADO Y CONSUMIDO:
+- La acción "Retirar para producción" descuenta inmediatamente la cantidad de stock DISPONIBLE del estante, para que otro trabajador no la vuelva a retirar.
+- Registrar además exactamente adónde fue esa cantidad. Para un retiro de material que se consumió efectivamente, clasificarlo como consumo de producción; para material retirado pero aún en poder del operario, clasificarlo como "entregado a producción / pendiente de consumo". El formulario puede resolverlo con una selección simple o con una regla de negocio consistente que AI Studio documente claramente.
+- En ningún caso una misma unidad puede descontarse dos veces al registrar después el producto fabricado. Si se registró ya como consumida, el cierre de producción solo la REFERENCIA y jamás vuelve a restarla. Si quedó "pendiente de consumo", se mueve a "consumido" al declarar su utilización efectiva: disminuye la custodia del operario, NO vuelve a disminuir el stock disponible del estante.
+- Los retiros no consumidos deben poder devolverse por un flujo autorizado y referenciado, sin crear stock ficticio.
+
+Si no hay Internet o falla el servidor, NO registrar el retiro localmente, NO actualizar el saldo como exitoso y NO generar una cola offline. Si se desconoce si la operación se completó, consultar por el identificador único de petición antes de intentar repetirla.
+
+================================================================================
+06. "NUEVA ORDEN DE PRODUCCIÓN": EL NUEVO FLUJO CORRECTO
+================================================================================
+
+Sustituir la dependencia de recetas por un proceso simple de órdenes reales. El dueño crea una NUEVA ORDEN DE PRODUCCIÓN y decide qué insumos PRINCIPALES entrega: generalmente chips UDP o memorias microSD. La orden permite seleccionar productos del inventario por fotografía/SKU, indicar cantidades y asignarlos a un almacén o responsable de producción.
+
+Formulario del administrador:
+- Botón visible: "+ Nueva orden de producción".
+- Número consecutivo/folio generado automáticamente.
+- Fecha de creación del servidor; creador.
+- Almacén de ORIGEN, destino o lugar de producción, responsable asignado.
+- Lista de insumos principales entregados: por ejemplo, "UDP 8 GB: 4.000 unidades"; también puede agregar UDP 16 GB o microSD de otro tipo si el trabajo lo requiere.
+- Foto y descripción al seleccionar cada SKU, cantidad, ubicación de salida y observaciones generales.
+- Objetivo o instrucciones de fabricación OPCIONALES: se puede sugerir marca/modelo planeado, pero NO exigir una receta rígida ni bloquear cambios legítimos de marca/modelo realizados por el personal.
+- Estado, prioridad y notas solo si ayudan de verdad al uso diario.
+
+Al CONFIRMAR la entrega/traslado de insumos principales, mover cantidades desde la custodia/almacén de origen a "en tránsito" o "entregado a producción" según corresponda. Disminuye el saldo DISPONIBLE del origen, pero NO se registra aún como consumo ni se borra del total físico de la empresa: el material sigue existiendo, ahora bajo otra custodia. El operario debe poder ACEPTAR LA RECEPCIÓN y verificar cantidades. Si encuentra diferencia, dejar discrepancia y solicitar revisión; jamás corregir la entrega automáticamente sin registro ni permiso.
+
+La orden debe seguir funcionando aunque se fabriquen varios modelos y marcas a partir de un mismo insumo principal. Un solo lote de UDP 8 GB puede transformarse en varios modelos de USB terminados; esto es una necesidad central del negocio.
+
+Estados sugeridos, sin complejidad gratuita:
+- Borrador (todavía no mueve stock).
+- Pendiente de recepción / Entregado (movimiento de custodia registrado cuando corresponda).
+- En producción.
+- Producción declarada / Pendiente de recogida (puede ocurrir parcialmente).
+- Cerrada (cuando se conciliaron entregas, consumos, terminados y sobrantes).
+- Cancelada, únicamente con compensación y registro; cancelar nunca borra movimientos ya realizados.
+
+No crear automáticamente cantidades de terminados al abrir la orden. No descontar insumos secundarios por una receta automática. No permitir múltiples estados contradictorios ni transiciones sin verificación del servidor.
+
+================================================================================
+07. LO QUE HACE EL PERSONAL CON UNA ORDEN
+================================================================================
+
+El trabajador ingresa y ve únicamente las órdenes autorizadas de su almacén/área. Cada tarjeta de orden debe mostrar: folio, foto y nombre de los UDP/memorias recibidos, cantidades recibidas, cantidades pendientes, estado y acciones sencillas:
+- "Aceptar entrega" (confirmar lo recibido; registrar diferencias).
+- "Retirar insumos" (abrir el módulo de retiro ya asociado a esta orden, preseleccionando almacén y mostrando fotos de empaques, adaptadores, cases, etc.).
+- "Registrar producción" (agregar los productos terminados realmente hechos, sin recetas).
+- "Entregar terminados" (proponer entrega total o parcial para posterior recepción del dueño).
+- "Ver movimientos" (bitácora completa de esa orden).
+
+REGISTRAR QUÉ SE PRODUJO:
+- Seleccionar el SKU del producto terminado, o un modelo permitido por el catálogo existente, mostrando marca, modelo, capacidad, color y FOTO.
+- Indicar cantidad realmente terminada. Puede registrar varios renglones y varias marcas en una misma orden. Ejemplo: 1.000 USB HP 8 GB, 1.500 USB Sony 8 GB, 1.000 USB Samsung 8 GB.
+- Relacionar, sin doble descuento, los insumos secundarios retirados para esa orden: empaque modelo A, case metálico modelo B, adaptador genérico, etc. El usuario podrá seleccionar las líneas de retiro ya realizadas y ver sus cantidades.
+- Relacionar qué cantidad de UDP/microSD entregados fue realmente consumida para producir cada línea o lote terminado. Si hay una diferencia con lo esperado, mostrarla y solicitar una justificación/aprobación según los permisos, en lugar de inventar un resultado.
+- Permitir PRODUCCIÓN PARCIAL en diferentes días y distintos lotes, con fecha, responsable, cantidades y detalle histórico.
+- No modificar libremente registros de producción ya confirmados; las rectificaciones se hacen con reversos/documentos de corrección autorizados.
+
+SIN RECETAS OBLIGATORIAS: no es necesario que un usuario defina por anticipado una lista de materiales fija por cada USB o microSD. La orden conserva el detalle REAL de componentes usados y el producto fabricado. Sin embargo, incluir validaciones generales sensatas para detectar faltantes o errores (por ejemplo, un USB terminado no puede consumir más UDP de los que realmente están asignados, y las cantidades declaradas deben ser compatibles con las existencias). Si una excepción de consumo es posible, exigir justificación y autorización, no corregir silenciosamente la cantidad.
+
+Para acelerar el uso, cuando un operario informa 1.000 USB terminados, la interfaz puede sugerir "1.000 UDP consumidos" como VALOR PROPUESTO cuando corresponda, pero el servidor debe validar lo realmente disponible y el empleado confirmar el dato; NO convertir esto en una receta automática obligatoria ni descontar material secundario sin registro. Es válida una ayuda visual de "componentes utilizados", siempre basada en datos reales.
+
+================================================================================
+08. RECIBIR / RECOGER PRODUCTOS TERMINADOS
+================================================================================
+
+Después de fabricar, el personal tiene que entregar los productos terminados al dueño o a un receptor autorizado. No basta con marcar "fabricado" y olvidarse de ellos.
+
+Implementar dentro de la orden o en una pestaña "Pendientes de recogida":
+- Ver por SKU/foto/modelo/capacidad: total declarado terminado, ya entregado/recibido y pendiente de recepción.
+- El personal registra "Preparar entrega" o "Entregar terminados" con cantidades exactas; puede hacerlo parcialmente.
+- El receptor cuenta físicamente los productos y pulsa "Confirmar recepción" con almacén y ubicación de destino reales; se registra quién entregó, quién recibió, fecha/hora, folio y posibles diferencias.
+- El producto no puede aparecer simultáneamente en poder del operario y en el almacén receptor. El cambio de custodia es atómico y auditable.
+- Las diferencias de cantidades y rechazos quedan pendientes de conciliación y no desaparecen del sistema.
+- Al retirar/recibir terminados, NO volver a descontar UDP, cases o empaques que ya fueron consumidos en etapas anteriores.
+- No cerrar totalmente una orden con materiales y terminados pendientes sin una conciliación válida y visible.
+
+El dueño puede consultar cuántas unidades fabricaron este mes, por marca/modelo/capacidad, y cuántas ya recibió, sin sumar dos veces las mismas unidades.
+
+================================================================================
+09. EJEMPLO REAL OBLIGATORIO: 20.000 UDP DE 8 GB Y ORDEN DE 4.000
+================================================================================
+
+Ejemplo operativo que el sistema debe soportar exactamente:
+
+A) El propietario tiene 20.000 UDP de 8 GB en su almacén privado/central. Ese es el saldo inicial disponible del ejemplo.
+B) Crea la orden OP-0001 y envía 4.000 UDP 8 GB a producción en Sencata. Su saldo DISPONIBLE en origen pasa de 20.000 a 16.000. Los 4.000 quedan identificados "entregados/en producción", NO consumidos ni perdidos. Total físico de UDP aún bajo custodia empresarial: 20.000.
+C) El trabajador acepta 4.000 UDP. Retira empaques y cases del inventario autorizado usando el botón RETIRAR, indica cantidades reales y asocia cada retiro a OP-0001 y a su finalidad. Los insumos desaparecen del stock disponible en su almacén según las cantidades retiradas, con su estado/consumo debidamente registrado.
+D) El trabajador registra tres resultados: 1.000 USB HP 8 GB + 1.500 USB Sony 8 GB + 1.000 USB Samsung 8 GB = 3.500 USB terminados. Declara consumo de 3.500 UDP de los 4.000 asignados, y relaciona los empaques/cases reales usados sin descontarlos otra vez si ya están consumidos.
+E) La orden debe mostrar 3.500 UDP consumidos y 500 UDP aún bajo custodia de producción, o indicar cuántos se devolvieron y cuántos siguen pendientes; NUNCA deben desaparecer las 500 unidades.
+F) El dueño recibe 2.000 USB terminados. Quedan 1.500 terminados pendientes de recogida. Esta recepción mueve custodia/existencias de PRODUCTO TERMINADO, NO consume nuevamente UDP ni empaques.
+G) Si luego se devuelven los 500 UDP no usados al almacén de origen, se registra devolución referida a OP-0001; el saldo disponible de origen pasa de 16.000 a 16.500 (si no hubo otros movimientos).
+H) El Kardex permite reconstruir cada evento y el resumen de producción muestra 3.500 fabricados, 2.000 recibidos y 1.500 pendientes, junto con insumos consumidos y sobrantes.
+
+Incluye una prueba automatizada de este caso con todas las operaciones y sus saldos. Si este escenario no funciona perfectamente, NO considerar terminada la modificación.
+
+================================================================================
+10. EJEMPLO DE MICROSD CON ADAPTADOR UNIVERSAL
+================================================================================
+
+Una orden puede involucrar microSD de una marca y capacidad determinada (ej.: microSD 32 GB), empaques específicos de ese modelo y adaptadores SD universales. El usuario retira los tres elementos disponibles que correspondan, registrando cada movimiento con la orden. El adaptador universal es UN SOLO SKU de inventario utilizable en múltiples capacidades; no duplicarlo en 8, 16, 32 o 64 GB por simple conveniencia.
+
+El empaque de papel y blíster/plástico se controla como un solo insumo compuesto, de acuerdo con la operativa real. Cada empaque específico debe distinguirse claramente mediante foto, SKU, descripción, modelo, marca y capacidad. No obligar al personal a configurar fórmulas de materiales. Al registrar las microSD empaquetadas, dejar evidencia de qué cantidades y componentes de esa orden se usaron.
+
+================================================================================
+11. ALMACENES, UBICACIONES Y RESTRICCIONES
+================================================================================
+
+Conservar y mejorar la asignación de almacenes. El administrador crea almacenes, secciones y ubicaciones; asigna usuarios. Un trabajador autorizado en Sencata no puede consultar ni retirar stock de Villa Dolores o Puente Bolivia, aunque modifique la URL, llame directamente a la API o manipule los parámetros del navegador. Filtrar todas las operaciones en el backend y comprobar el permiso sobre CADA objeto seleccionado y CADA movimiento.
+
+No permitir retirar de una ubicación donde no hay stock suficiente. Las órdenes y los retiros deben indicar origen y custodio; la entrega de producción debe indicar destino y custodio. Los movimientos entre almacenes no son consumos, y los consumos no son traslados. Permitir corregir ubicación mediante movimientos auditados, no editando cantidades directamente.
+
+================================================================================
+12. HISTORIAL Y KARDEX: REDISEÑO VISUAL Y FUNCIONAL
+================================================================================
+
+El módulo actual de Historial/Kardex debe mejorarse para que un trabajador o administrador entienda qué ocurrió sin revisar tablas técnicas. Diseñar una interfaz profesional, ordenada y visualmente atractiva, pero sobria y ligera.
+
+Propuesta:
+- Encabezado claro: "Historial y Kardex".
+- Búsqueda universal por SKU, nombre, modelo, marca, folio de movimiento, orden o usuario, con filtros rápidos.
+- Filtros por rango de fechas, almacén, producto, tipo de movimiento, usuario y orden; respetar permisos del usuario.
+- Resumen discreto de ingresos, retiros, entregas a producción, consumos, devoluciones y existencias finales dentro del contexto filtrado, SIN mezclar diferentes SKUs como si fueran un único saldo.
+- Tabla de movimientos con fecha/hora, miniatura/foto, producto, tipo, cantidad con signo o transferencia, origen, destino, usuario, orden vinculada, motivo y folio.
+- Colores e iconos coherentes, no dependientes solo del color: ingreso, retiro/consumo, traslado, producción, devolución, ajuste/reverso.
+- Al pulsar un movimiento, abrir un panel lateral o ventana de "Detalle" que muestre ANTES y DESPUÉS, persona responsable, referencia de la orden, descripción de la justificación, movimientos vinculados y fecha/hora del servidor.
+- Vista "Kardex por producto y almacén" que presente saldo inicial del período, entradas, salidas y saldo final calculado del libro de movimientos, con posibilidad de comprobar el origen de cada cifra.
+- Vista "Movimientos de esta orden" para reconstruir el ciclo de una orden sin abandonar su pantalla.
+- Exportación CSV/Excel/PDF si ya es compatible o resulta realmente útil, con los mismos permisos y filtros del backend, sin exponer precios ni datos privados.
+- En celular usar filtros plegables y tarjetas legibles; en PC tabla con columnas claras, sin saturar.
+
+Todas las cifras deben estar respaldadas por movimientos persistentes. No eliminar ni editar el Kardex histórico confirmado; una corrección siempre crea un nuevo movimiento con vínculo al original y motivo. No permitir borrar registros desde la interfaz a usuarios operativos.
+
+================================================================================
+13. REGLAS CONTABLES DEL INVENTARIO: UNA SOLA FUENTE DE VERDAD
+================================================================================
+
+El sistema debe operar sobre una base de datos central y transacciones atómicas. Mantener UN libro de movimientos (ledger/Kardex) como referencia auditable del stock. Un balance o tabla de existencias puede mantenerse por rendimiento, pero debe poder conciliarse con los movimientos y nunca editarse libremente desde el navegador.
+
+TIPOS DE MOVIMIENTO claramente diferentes:
+- INGRESO de insumo: incrementa disponible en una ubicación.
+- RETIRO/CONSUMO: reduce disponible y registra consumo real o pasa a custodia de producción según corresponda; NO genera doble descuento.
+- TRANSFERENCIA / ENTREGA A PRODUCCIÓN: reduce disponible en origen y aumenta en tránsito / custodia de producción; la existencia global del insumo NO disminuye todavía.
+- CONSUMO EN PRODUCCIÓN: reduce la existencia bajo custodia de producción y deja referencia a orden/lote/output. Si ya se había registrado como consumo efectivo en el retiro, no repetirlo.
+- ALTA DE PRODUCTO TERMINADO por producción confirmada: crea unidades del SKU terminado en custodia de producción, referenciadas a un lote y sus insumos consumidos; NO inventa stock si no hay entradas/consumos justificados.
+- RECOGIDA/RECEPCIÓN: mueve terminado de custodia del trabajador al almacén receptor, sin crear otra vez el mismo producto.
+- DEVOLUCIÓN: retorna unidades reales no utilizadas, referidas al retiro/orden original.
+- REVERSO/AJUSTE: documento autorizado, con motivo, usuario, sello de tiempo y trazabilidad; no borrar eventos históricos.
+
+Invariantes obligatorias:
+1. Cantidades positivas enteras en unidades, salvo catálogo futuro de unidades fraccionarias explícitamente aprobado.
+2. Prohibido stock negativo en cada almacén/ubicación/estado y en la custodia de una orden.
+3. Un mismo movimiento de negocio se aplica UNA SOLA VEZ (idempotencia en servidor y restricciones de base de datos).
+4. Si alguna parte falla, no deben quedar descuentos parciales ni un producto terminado sin su registro de origen. Utilizar transacciones ACID y bloqueos o actualización condicional de stock.
+5. No duplicar saldos entre "privado" y "trabajadores". Son vistas y custodias distintas de un mismo inventario, no bases de datos que se copian.
+6. No transformar indebidamente UDP de una capacidad en USB de otra sin permiso y justificación explícita.
+7. No registrar recepción de terminados por encima de lo que realmente está pendiente de entrega.
+8. No consumir más materias primas de las entregadas/disponibles en la orden.
+9. Mostrar siempre diferencias por materiales faltantes, merma, sobrantes y saldos sin conciliar.
+10. Los importes/precios privados no intervienen en los cálculos operativos de cantidad.
+
+================================================================================
+14. DISEÑO DE DATOS: ADAPTAR EL ESQUEMA, NO DESTRUIRLO
+================================================================================
+
+Antes de tocar la base de datos, INSPECCIONA su esquema actual. Reutiliza con seguridad las tablas existentes que ya cumplan estas funciones. Según la arquitectura actual, podrían requerirse:
+- products (SKU, tipo, marca, modelo, capacidad, color, descripción, estatus).
+- product_images (referencia segura al archivo; no fotografías enormes incrustadas arbitrariamente en cada consulta).
+- warehouses, locations, user_warehouse_permissions.
+- inventory_balances por SKU + almacén + ubicación + estado/custodia.
+- inventory_movements / movement_documents y movement_lines inmutables; folio e idempotency_key únicos.
+- production_orders y production_order_items (material principal asignado por SKU/cantidad).
+- production_dispatches / acceptances, custodias o reservas.
+- production_material_withdrawals (líneas de retiros vinculados a la orden) y registros de consumo; evitar tablas redundantes que apliquen el movimiento dos veces.
+- production_outputs/batches por producto terminado, marca/modelo/capacidad/SKU/cantidad.
+- production_handoffs / receipts y saldos pendientes.
+- audit_events con actor, acción, antes/después relevante, fecha del servidor y referencia.
+
+Ajusta nombres y entidades al código REAL. Evita crear módulos paralelos que no hablan entre sí, duplicados de tablas o dos lógicas independientes de actualización de saldos. Si las recetas tienen dependencias históricas, crea una migración no destructiva y deja antiguas referencias consultables como solo lectura para auditoría. Prohíbe eliminar movimientos confirmados y preservar vínculos históricos incluso si un producto queda inactivo. Migraciones versionadas, con copia de seguridad y plan de reversión probado en pruebas.
+
+================================================================================
+15. USUARIOS, PERMISOS Y SEGURIDAD PRÁCTICA
+================================================================================
+
+Seguridad seria y proporcional a una aplicación de empresa, sin convertirla en un proyecto de complejidad bancaria:
+- Login seguro; contraseñas con hash moderno y sal; sesiones o tokens seguros con expiración y revocación.
+- Roles mínimos: PROPIETARIO/ADMIN, ENCARGADO DE ALMACÉN, OPERARIO DE PRODUCCIÓN y RECEPTOR/AUDITOR cuando sea necesario. Permisos granulares por acción y almacén; un rol no da automáticamente acceso a todos los almacenes.
+- El personal no puede crear permisos, concederse privilegios, alterar precios, borrar inventario ni consultar costos.
+- Proteger TODAS las rutas, endpoints, exportaciones y consultas en el backend; nunca confiar en que un botón oculto equivale a seguridad.
+- Validar entradas, evitar SQL injection, IDOR (acceso por ID a registros ajenos), XSS, CSRF según tipo de autenticación; usar HTTPS, límites razonables de peticiones y logs de acceso relevantes.
+- Protecciones contra intentos repetidos de login y contraseñas por defecto en producción.
+- Fotos: validar tipo/tamaño, nombre seguro, permisos, almacenamiento privado cuando corresponda y acceso controlado. Evitar que un archivo malicioso se ejecute.
+- Claves y credenciales solo en servidor/gestor de secretos; no exponer secretos ni conexiones a base de datos en frontend.
+- Respaldos automáticos, retención razonable y prueba periódica de restauración; evitar copia o mezcla con el POS o con bases de datos de otras apps.
+- Toda modificación de stock sensible debe tener autorización, auditoría y prueba.
+
+El objetivo no es prometer inmunidad frente a ataques, sino eliminar vulnerabilidades comunes y prevenir errores operativos que comprometan inventario real.
+
+================================================================================
+16. EXCLUSIVAMENTE ONLINE: NUNCA OFFLINE NI CACHÉ DE MOVIMIENTOS
+================================================================================
+
+Esta es una condición explícita del dueño porque ya sufrió descuadres por almacenamiento local y sincronización en otro sistema.
+- Todo ingreso, retiro, entrega, aceptación, consumo, producción, recepción y reverso se CONFIRMA en el servidor y en la base de datos central antes de comunicar éxito.
+- No implementar modo offline, caché persistente de inventario, IndexedDB para saldos, localForage, cola offline, sincronización diferida ni reenvío automático de movimientos desde un service worker.
+- Si existen PWA/service workers en el proyecto, revisarlos para que jamás sirvan respuestas de stock desactualizadas como válidas ni almacenen solicitudes de movimientos; versionar estáticos adecuadamente y evitar versiones de interfaz incompatibles con la API.
+- Al perder conexión, bloquear las acciones de escritura y mostrar "Sin conexión. No se ha registrado el movimiento" solo cuando el servidor confirme que no lo recibió; si la respuesta es incierta, verificar su identificador de operación.
+- Tras confirmar, refrescar saldos y mostrar folio real; si falla, conservar el formulario visible sin afirmar que se guardó.
+
+================================================================================
+17. INTERFAZ VISUAL: MODERNA, RÁPIDA Y PARA PERSONAL NO TÉCNICO
+================================================================================
+
+No sobrecargar con gráficos, cuadros financieros o paneles sofisticados. Elegir una estética actual, limpia, sobria, con buen contraste y fotografías útiles. Priorizar legibilidad y velocidad tanto en celulares Android verticales como en computadoras Windows.
+
+Requisitos de UX:
+- Máximo unas pocas acciones claras para ingresar, retirar o registrar producción.
+- Botones "Ingresar", "Retirar", "+ Nueva orden de producción", "Registrar producción", "Entregar" y "Confirmar recepción" siempre claramente diferenciados.
+- Evitar tablas enormes e ilegibles en móvil; usar tarjetas compactas y campos bien espaciados.
+- Búsqueda/autocompletado por nombre, SKU, capacidad, modelo y fotografía; evitar seleccionar el empaque equivocado.
+- Mostrar almacén y ubicación visibles en cada registro, con permisos aplicados.
+- Confirmación con vista previa de saldo anterior, cambio y saldo resultante para movimientos de stock.
+- Alertas útiles y concretas: "No hay suficientes empaques en esta ubicación", "Esta orden no pertenece a su almacén", "Ya se registró esta operación", "Quedan 500 UDP pendientes".
+- Carga progresiva de listas/fotos, imágenes comprimidas y miniaturas. No descargar todas las imágenes originales en cada listado.
+- No requerir navegar por cinco pantallas para retirar un producto.
+- Mantener consistencia de nombres y colores. No hacer animaciones pesadas ni efectos que interfieran con producción.
+- Accesibilidad básica: foco de teclado, botones táctiles amplios, mensajes de error visibles y legibles.
+
+================================================================================
+18. PRUEBAS OBLIGATORIAS: REVISAR LA LÓGICA 2 O 3 VECES
+================================================================================
+
+No basta con que el programa compile o se vea bonito. Ejecutar y documentar pruebas automáticas, integración API/base de datos y revisión manual de recorridos. Revisar al menos tres veces los flujos críticos: (1) razonamiento de reglas de negocio, (2) pruebas automáticas de saldos, (3) prueba de integración completa por varios usuarios y almacenes.
+
+Escenarios mínimos:
+1. Alta de producto con foto sin duplicar SKU ni inventario.
+2. Ingreso de 1.000 empaques: saldo aumenta exactamente 1.000; Kardex registra una sola entrada.
+3. Retiro de 100: disponible baja de 1.000 a 900; debe existir folio, motivo, usuario y orden si es producción.
+4. Retiro de 1.500 sobre disponible 900: rechazar sin modificar una sola cantidad.
+5. Doble clic y reintentos de red sobre el mismo retiro: registrar solo UNA operación.
+6. Dos trabajadores retirando al mismo tiempo del mismo saldo: nunca vender/retirar por encima de la existencia real ni quedar stock negativo.
+7. Empleado de Sencata intentando consultar/retirar Villa Dolores mediante API: denegación real.
+8. Orden de 4.000 UDP tomada de 20.000: origen disponible 16.000, producción custodia 4.000, global físico total 20.000 antes de consumo.
+9. Registro de 3.500 USB fabricados en distintos modelos: consumir exactamente 3.500 UDP y mantener 500 pendientes; verificar empaques/cases sin doble consumo.
+10. Recepción parcial de 2.000 terminados: 1.500 pendientes; no descontar materias primas otra vez.
+11. Devolución de 500 UDP: origen vuelve a 16.500 si no hubo otros movimientos, con trazabilidad completa.
+12. Orden cancelada tras entrega o retiros: no borrar el pasado; exigir devolución/reverso formal.
+13. Cambio de foto o nombre de un SKU: conservar historial y referencias de movimientos.
+14. Corte de Internet justo después de confirmar: manejar respuesta incierta por idempotencia/consulta; no duplicar.
+15. Kardex filtrado por mes y almacén: saldo inicial + ingresos - consumos y salidas netas + ajustes pertinentes = saldo final; distinguir transferencias y custodias.
+16. Acceso directo a rutas de administrador por operario: denegado desde backend.
+17. Fotos inválidas/archivos grandes/entradas manipuladas: rechazar limpiamente.
+18. Un producto recibido dos veces por dos receptores al mismo tiempo: segunda recepción bloqueada o limitada al pendiente real.
+19. Material retirado a producción pero no consumido: devolverlo correctamente, sin inflar el stock global.
+20. Comprobar que la antigua lógica de recetas NO se ejecuta escondida ni aplica descuentos adicionales.
+
+Ninguna prueba deberá modificar registros reales de producción; usar ambiente aislado o fixtures transaccionales de prueba. Documenta resultados, errores encontrados y correcciones realizadas antes de considerar lista la actualización.
+
+================================================================================
+19. MÉTODO DE TRABAJO EN AI STUDIO: CÓMO DEBES IMPLEMENTAR
+================================================================================
+
+FASE 1 - INSPECCIÓN: Revisa el proyecto completo en lo pertinente, sin cambios iniciales. Enumera componentes y endpoints involucrados en inventario, productos, recetas, producción/órdenes, entregas, usuarios, Kardex, saldos y caché. Determina el esquema real, dependencias y riesgos de modificación.
+
+FASE 2 - DISEÑO CORTO: Explica cómo se eliminará la dependencia operativa de recetas, cómo funcionarán el retiro y las órdenes, qué entidades se reutilizan, qué migraciones no destructivas se necesitan y en qué momento exacto se registra cada descuento. Dibuja o describe el flujo de estados y saldos. Resuelve explícitamente el riesgo de DESCUENTO DOBLE antes de implementar.
+
+FASE 3 - IMPLEMENTACIÓN POR MÓDULOS: Modifica primero backend/transacciones/permisos, luego formularios "Ingresar/Retirar", después órdenes/registro de producción/entrega, y finalmente Historial/Kardex y ajustes visuales. No realices una reestructuración general si bastan cambios puntuales. Mantén intactos los demás módulos funcionales.
+
+FASE 4 - PRUEBAS AISLADAS: Construye los escenarios y verifica las invariantes con consultas reales a una base de datos DE PRUEBA. Verifica interfaz en PC y Android vertical. No uses datos de prueba en producción ni inventes una operación real para "probar".
+
+FASE 5 - REVISIÓN: Compara comportamiento nuevo y anterior, identifica regresiones, presenta informe de archivos modificados, migraciones, endpoints, pruebas aprobadas, riesgos y recomendaciones. No afirmes que todo está correcto si una ruta no se probó.
+
+FASE 6 - DESPLIEGUE CONTROLADO: Prepara backup verificado, migraciones reversibles y plan de rollback, pero NO publiques, migres o alteres los registros productivos sin autorización explícita del dueño.
+
+================================================================================
+20. LIBERTAD PARA PROPONER MEJORAS SIN COMPLICAR LA APLICACIÓN
+================================================================================
+
+Puedes aportar ideas más profesionales y mejores alternativas si solucionan un problema real, pero respeta estos límites:
+- Las mejoras deben simplificar trabajo, prevenir errores o mejorar trazabilidad y seguridad.
+- No agregues recetas obligatorias, sistemas contables, costos visibles para empleados, escáneres obligatorios, complejos módulos ERP, múltiples bases de datos sincronizadas ni automatizaciones que inventen datos.
+- Si una decisión operativa es ambigua (por ejemplo, "retirado pero todavía no consumido"), plantea y aplica una distinción de estados sencilla que conserve las existencias físicas y evite doble descuento; explica cómo la verá el trabajador sin tecnicismos.
+- Puedes sugerir código QR o etiquetas imprimibles de productos, filtros rápidos, cierre diario, alertas de inventario mínimo o recepción por lotes como MEJORAS OPCIONALES, pero no invertir tiempo en ellas antes de completar y probar el núcleo solicitado.
+- Antes de incorporar mejoras que cambien los permisos, los saldos o el flujo aprobado, indica claramente sus consecuencias y solicita decisión del propietario.
+- El diseño de datos y las pantallas deben permitir a futuro ampliar el proyecto, sin construir hoy funcionalidades innecesarias.
+
+================================================================================
+21. RESULTADOS Y CRITERIOS DE ACEPTACIÓN FINALES
+================================================================================
+
+El trabajo quedará correctamente realizado solo si se demuestra que:
+[ ] La sección "Recetas de ensamblaje" ya no interfiere en el flujo ni exige configuración; datos históricos no fueron destruidos.
+[ ] "Inventario y Productos" permite crear/fotografiar insumos (según permisos), INGRESAR y RETIRAR unidades.
+[ ] RETIRAR funciona desde cada producto y exige justificación y orden de producción cuando corresponda.
+[ ] El stock se actualiza de forma atómica y auditada, con fecha/hora del servidor, usuario, almacén y ubicación.
+[ ] Los empleados solo trabajan en almacenes y órdenes autorizados; no pueden editar productos o movimientos que no deben.
+[ ] "Nueva orden de producción" permite al dueño asignar y entregar UDP o microSD al personal.
+[ ] El personal acepta las cantidades recibidas, registra insumos usados y en qué modelos/marcas/capacidades transformó los materiales.
+[ ] Se admiten varios modelos terminados y producciones parciales dentro de la misma orden, sin recetas rígidas.
+[ ] Los materiales retirados/consumidos NO se descuentan por segunda vez al informar producción.
+[ ] Se registran terminados pendientes, entregas, recepciones parciales, diferencias y sobrantes.
+[ ] Historial/Kardex muestra cada movimiento, saldo, folio, usuario, fecha, motivo y orden de una forma visual clara.
+[ ] No existe operación offline ni saldo persistido en caché del navegador como fuente de verdad.
+[ ] No hay stock negativo, duplicados por clic/reintento, desaparición de movimientos ni ediciones silenciosas del pasado.
+[ ] La base de datos y servicios de esta app están aislados del POS y de otras aplicaciones.
+[ ] El ejemplo 20.000 -> 4.000 asignados -> 3.500 producidos -> 500 pendientes -> 2.000 recibidos funciona y cuadra exactamente.
+[ ] Las pruebas, cambios y controles de seguridad se documentan; el dueño puede revisarlos antes de desplegar.
+
+ENTREGA DE AI STUDIO SOLICITADA:
+1. Breve diagnóstico de la aplicación actual y propuesta de cambios concretos.
+2. Implementación funcional integrada en el código existente, por etapas, con migraciones no destructivas si son imprescindibles.
+3. Capturas o descripción precisa del nuevo flujo visual, manteniendo un estilo sencillo y profesional.
+4. Evidencia de pruebas de stock, permisos, recepción y concurrencia.
+5. Resumen de mejoras propias verdaderamente útiles que hayas incorporado o que propongas para aprobación.
+6. Confirmación explícita de qué está probado, qué requiere revisión y qué falta para producción, sin exageraciones.
+
+INSTRUCCIÓN FINAL: Lee todos los requisitos como un único sistema coherente. No soluciones la falta del botón "Retirar" agregando una simple resta en el frontend; implementa el libro de movimientos, la justificación vinculada a la orden, los permisos y el flujo de consumo/producción/recepción completo. Esta aplicación manejará cantidades reales de mercancía; su integridad es más importante que su apariencia. Mejora la propuesta con criterio profesional y creatividad PRÁCTICA, siempre sin romper lo que ya funciona y sin añadir complejidad innecesaria.

@@ -43,7 +43,12 @@ export interface WarehouseLocation {
 export interface ProductCategory {
   id: number;
   name: string;
-  accountingType: 'STRATEGIC_COMPONENT' | 'SECONDARY_COMPONENT' | 'PACKAGING_KIT' | 'UNIVERSAL_ACCESSORY' | 'FINISHED_GOOD';
+  accountingType:
+    | 'STRATEGIC_COMPONENT'
+    | 'SECONDARY_COMPONENT'
+    | 'PACKAGING_KIT'
+    | 'UNIVERSAL_ACCESSORY'
+    | 'FINISHED_GOOD';
   description: string;
   colorHex: string;
 }
@@ -54,7 +59,12 @@ export interface Product {
   name: string;
   normalizedKey: string;
   description: string;
-  productType: 'STRATEGIC_COMPONENT' | 'SECONDARY_COMPONENT' | 'PACKAGING_KIT' | 'UNIVERSAL_ACCESSORY' | 'FINISHED_GOOD';
+  productType:
+    | 'STRATEGIC_COMPONENT'
+    | 'SECONDARY_COMPONENT'
+    | 'PACKAGING_KIT'
+    | 'UNIVERSAL_ACCESSORY'
+    | 'FINISHED_GOOD';
   family: string; // Classification / Department Name
   brand: string;
   model: string;
@@ -156,13 +166,15 @@ export interface ProductionBatch {
   id: number;
   batchFolio: string;
   productionOrderId: number;
-  recipeId: number;
-  recipeVersionId: number;
+  recipeId: number | null;
+  recipeVersionId: number | null;
   finishedProductId: number;
   warehouseId: number;
   locationId: number;
   quantityProduced: number;
+  strategicQtyConsumed: number;
   quantityPickedUp: number;
+  usedWithdrawalFolios: string;
   movementDocumentId: number;
   operatorUserId: number;
   notes: string;
@@ -236,6 +248,7 @@ export interface MovementDocument {
   destLocationId: number | null;
   productionOrderId: number | null;
   supplierOrContainer: string;
+  recipientOrTarget: string;
   reason: string;
   notes: string;
   createdByUserId: number;
@@ -254,12 +267,36 @@ export interface MovementLine {
   fromLocationId: number | null;
   fromStatus: string | null;
   fromOrderId: number;
+  fromStockBefore: number | null;
+  fromStockAfter: number | null;
   toWarehouseId: number | null;
   toLocationId: number | null;
   toStatus: string | null;
   toOrderId: number;
+  toStockBefore: number | null;
+  toStockAfter: number | null;
   lotCode: string;
   createdAt: string;
+}
+
+export interface MovementVoucherData {
+  folio: string;
+  operationTitle: string;
+  operationType: 'INGRESO' | 'RETIRO' | 'TRANSFERENCIA' | 'PRODUCCION' | 'DEVOLUCION';
+  serverTimestamp: string;
+  userFullName: string;
+  productSku: string;
+  productName: string;
+  productImageUrl?: string;
+  warehouseName: string;
+  locationName: string;
+  orderNumber?: string | null;
+  recipientOrTarget?: string;
+  reason: string;
+  notes?: string;
+  stockBefore: number;
+  quantityChanged: number;
+  stockAfter: number;
 }
 
 export interface WorkspaceData {
@@ -267,7 +304,13 @@ export interface WorkspaceData {
   warehouses: Warehouse[];
   allWarehousesSummary: { id: number; code: string; name: string; isProductionPlant: boolean }[];
   locations: WarehouseLocation[];
-  allLocationsSummary: { id: number; warehouseId: number; code: string; zoneName: string; shelfName: string }[];
+  allLocationsSummary: {
+    id: number;
+    warehouseId: number;
+    code: string;
+    zoneName: string;
+    shelfName: string;
+  }[];
   categories: ProductCategory[];
   products: Product[];
   recipes: Recipe[];
@@ -330,7 +373,7 @@ export function translateStatus(status: string): string {
     AVAILABLE: 'Disponible en Almacén',
     RESERVED_ORDER: 'Reservado en Orden',
     IN_TRANSIT_PRODUCTION: 'En Camino a Producción',
-    IN_PRODUCTION_CUSTODY: 'En Taller de Producción',
+    IN_PRODUCTION_CUSTODY: 'En Custodia de Producción',
     FINISHED_PENDING_PICKUP: 'Terminado Listo p/ Recoger',
     FINISHED_IN_TRANSIT: 'Terminado en Tránsito',
     IN_TRANSIT_TRANSFER: 'En Tránsito entre Almacenes',
@@ -340,13 +383,38 @@ export function translateStatus(status: string): string {
   return map[status] || status;
 }
 
+export function translateMovementType(type: string): string {
+  const map: Record<string, string> = {
+    INGRESO_PROVEEDOR: 'Ingreso de Mercancía',
+    DEVOLUCION_INSUMOS: 'Devolución de Insumos No Usados',
+    REGULARIZACION_AUTORIZADA: 'Regularización Autorizada',
+    APERTURA_INICIAL: 'Stock Inicial de Catálogo',
+    RETIRO_PRODUCCION: 'Retiro de Insumos para Orden (OP)',
+    RETIRO_OPERATIVO: 'Retiro por Consumo Operativo',
+    RETIRO_MERMA: 'Retiro por Merma / Daño',
+    RESERVA_OP: 'Reserva para Orden de Producción',
+    DESPACHO_OP: 'Entrega de Componente a Producción',
+    ACEPTACION_OP: 'Recepción en Custodia de Producción',
+    PRODUCCION_LOTE: 'Registro de Producción Terminada',
+    RETORNO_INSUMO_OP: 'Devolución de Sobrantes de Orden',
+    MERMA_OP: 'Merma en Orden de Producción',
+    DESPACHO_TERMINADO: 'Entrega de Producto Terminado',
+    RECEPCION_TERMINADO: 'Recogida / Recepción de Terminado',
+    TRANSFERENCIA_SALIDA: 'Salida por Transferencia de Almacén',
+    TRANSFERENCIA_RECEPCION: 'Recepción de Transferencia',
+    CAMBIO_UBICACION: 'Cambio de Ubicación Interna',
+    AJUSTE_CONTEO: 'Ajuste por Conteo Físico',
+  };
+  return map[type] || type;
+}
+
 export function translateRole(role: string): string {
   const map: Record<string, string> = {
-    OWNER: 'Administrador Principal',
+    OWNER: 'Propietario / Administrador General',
     ADMIN: 'Administrador Operativo',
     WAREHOUSE_MANAGER: 'Encargado de Almacén',
     PRODUCTION_MANAGER: 'Encargado de Producción',
-    OPERATOR: 'Operario de Taller',
+    OPERATOR: 'Operario de Producción',
     AUDITOR: 'Receptor / Auditor',
   };
   return map[role] || role;
@@ -354,11 +422,11 @@ export function translateRole(role: string): string {
 
 export function translateAccountingType(type: string): string {
   const map: Record<string, string> = {
-    STRATEGIC_COMPONENT: 'Componente Principal (Se entrega por Orden, ej. UDP / microSD)',
-    SECONDARY_COMPONENT: 'Insumo de Taller (Se descuenta por Receta, ej. Case)',
-    PACKAGING_KIT: 'Empaque / Blíster (Se descuenta por Receta)',
-    UNIVERSAL_ACCESSORY: 'Accesorio Universal (Ej. Adaptador SD)',
-    FINISHED_GOOD: 'Producto Terminado (Generado al fabricar)',
+    STRATEGIC_COMPONENT: 'Componente Estratégico (Ej. Chip UDP / Memoria microSD)',
+    SECONDARY_COMPONENT: 'Insumo de Ensamblaje (Ej. Case / Carcasa)',
+    PACKAGING_KIT: 'Empaque / Blíster (Se retira por Orden)',
+    UNIVERSAL_ACCESSORY: 'Accesorio / Adaptador (Ej. Adaptador SD)',
+    FINISHED_GOOD: 'Producto Terminado (Generado en Orden de Producción)',
   };
   return map[type] || type;
 }

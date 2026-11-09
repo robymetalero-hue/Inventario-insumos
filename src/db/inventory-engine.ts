@@ -1,4 +1,4 @@
-import { db, pool } from './index.ts';
+import { db } from './index.ts';
 import {
   products,
   warehouses,
@@ -18,7 +18,19 @@ import {
   recipeComponents,
   idempotencyKeys,
 } from './schema.ts';
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
+
+export type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+async function runInTx<T>(
+  externalTx: DbTx | undefined,
+  fn: (tx: DbTx) => Promise<T>
+): Promise<T> {
+  if (externalTx) {
+    return await fn(externalTx);
+  }
+  return await db.transaction(fn);
+}
 
 export interface LedgerTransition {
   productId: number;
@@ -36,6 +48,24 @@ export interface LedgerTransition {
     orderId?: number;
   };
   lotCode?: string;
+  targetOrderIdForAudit?: number;
+}
+
+export interface TransitionSnapshot {
+  productId: number;
+  sku: string;
+  name: string;
+  quantity: number;
+  fromWarehouseId: number | null;
+  fromLocationId: number | null;
+  fromStatus: string | null;
+  fromStockBefore: number | null;
+  fromStockAfter: number | null;
+  toWarehouseId: number | null;
+  toLocationId: number | null;
+  toStatus: string | null;
+  toStockBefore: number | null;
+  toStockAfter: number | null;
 }
 
 function generateFolio(prefix: string): string {
@@ -69,15 +99,20 @@ export function normalizeProductKey(
 /**
  * Core atomic balance modifier using PostgreSQL transaction client.
  * Locks rows via SELECT ... FOR UPDATE to guarantee zero race conditions or negative stock.
+ * Records exact before/after stock snapshots on every immutable movement line.
  */
 async function applyTransitionsInTx(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tx: DbTx,
   documentId: number,
   transitions: LedgerTransition[]
-) {
+): Promise<TransitionSnapshot[]> {
+  const snapshots: TransitionSnapshot[] = [];
+
   for (const t of transitions) {
     if (!Number.isInteger(t.quantity) || t.quantity <= 0) {
-      throw new Error(`Cantidad inválida (${t.quantity}). Solo se permiten enteros positivos mayores a cero.`);
+      throw new Error(
+        `Cantidad inválida (${t.quantity}). Solo se permiten números enteros positivos mayores a cero.`
+      );
     }
 
     const prodRows = await tx
@@ -88,6 +123,11 @@ async function applyTransitionsInTx(
     if (!prod) {
       throw new Error(`Producto ID ${t.productId} no existe en el catálogo maestro.`);
     }
+
+    let fromStockBefore: number | null = null;
+    let fromStockAfter: number | null = null;
+    let toStockBefore: number | null = null;
+    let toStockAfter: number | null = null;
 
     // 1. If there is a source, lock and deduct
     if (t.from) {
@@ -111,15 +151,17 @@ async function applyTransitionsInTx(
 
       if (!currentBalance || availableQty < t.quantity) {
         throw new Error(
-          `Stock insuficiente para ${prod.sku} (${prod.name}) en estado ${t.from.status}. Disponible: ${availableQty}, Requerido: ${t.quantity}.`
+          `Stock insuficiente para ${prod.sku} (${prod.name}). Disponible actual: ${availableQty}, Cantidad solicitada: ${t.quantity}.`
         );
       }
 
-      const newQty = availableQty - t.quantity;
+      fromStockBefore = availableQty;
+      fromStockAfter = availableQty - t.quantity;
+
       await tx
         .update(inventoryBalances)
         .set({
-          quantity: newQty,
+          quantity: fromStockAfter,
           updatedAt: new Date(),
         })
         .where(eq(inventoryBalances.id, currentBalance.id));
@@ -143,14 +185,18 @@ async function applyTransitionsInTx(
         .for('update');
 
       if (existingTo[0]) {
+        toStockBefore = existingTo[0].quantity;
+        toStockAfter = toStockBefore + t.quantity;
         await tx
           .update(inventoryBalances)
           .set({
-            quantity: existingTo[0].quantity + t.quantity,
+            quantity: toStockAfter,
             updatedAt: new Date(),
           })
           .where(eq(inventoryBalances.id, existingTo[0].id));
       } else {
+        toStockBefore = 0;
+        toStockAfter = t.quantity;
         await tx.insert(inventoryBalances).values({
           productId: t.productId,
           warehouseId: t.to.warehouseId,
@@ -163,7 +209,7 @@ async function applyTransitionsInTx(
       }
     }
 
-    // 3. Append immutable ledger line
+    // 3. Append immutable ledger line with before/after stock snapshots
     await tx.insert(inventoryMovementLines).values({
       documentId,
       productId: prod.id,
@@ -174,24 +220,49 @@ async function applyTransitionsInTx(
       fromLocationId: t.from?.locationId ?? null,
       fromStatus: t.from?.status ?? null,
       fromOrderId: t.from?.orderId ?? 0,
+      fromStockBefore,
+      fromStockAfter,
       toWarehouseId: t.to?.warehouseId ?? null,
       toLocationId: t.to?.locationId ?? null,
       toStatus: t.to?.status ?? null,
-      toOrderId: t.to?.orderId ?? 0,
+      toOrderId: t.to?.orderId ?? t.targetOrderIdForAudit ?? 0,
+      toStockBefore,
+      toStockAfter,
       lotCode: t.lotCode ?? '',
     });
+
+    snapshots.push({
+      productId: prod.id,
+      sku: prod.sku,
+      name: prod.name,
+      quantity: t.quantity,
+      fromWarehouseId: t.from?.warehouseId ?? null,
+      fromLocationId: t.from?.locationId ?? null,
+      fromStatus: t.from?.status ?? null,
+      fromStockBefore,
+      fromStockAfter,
+      toWarehouseId: t.to?.warehouseId ?? null,
+      toLocationId: t.to?.locationId ?? null,
+      toStatus: t.to?.status ?? null,
+      toStockBefore,
+      toStockAfter,
+    });
   }
+
+  return snapshots;
 }
 
 /**
  * Checks idempotency key inside transaction. If already processed, returns cached response.
  */
 async function checkIdempotencyInTx(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tx: DbTx,
   idempotencyKey: string
 ): Promise<any | null> {
   if (!idempotencyKey || idempotencyKey.trim() === '') {
-    throw new Error('Se requiere clave única de solicitud (Idempotency-Key) para confirmar la operación.');
+    throw new Error(
+      'Se requiere clave única de solicitud (Idempotency-Key) para confirmar la operación.'
+    );
   }
   const existing = await tx
     .select()
@@ -204,7 +275,7 @@ async function checkIdempotencyInTx(
 }
 
 async function saveIdempotencyInTx<T>(
-  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  tx: DbTx,
   idempotencyKey: string,
   userId: number,
   operationType: string,
@@ -219,16 +290,20 @@ async function saveIdempotencyInTx<T>(
 }
 
 /**
- * 1. Supplier or Container Goods Receipt (Ingreso de Mercancía / Apertura Inicial)
- * Optionally records private owner landed costs in the same atomic transaction.
+ * 1. INGRESAR STOCK (Goods Receipt / Return of Unused Supplies / Authorized Regularization)
  */
 export async function registerGoodsReceipt(params: {
   idempotencyKey: string;
   userId: number;
-  movementType: 'INGRESO_PROVEEDOR' | 'APERTURA_INICIAL';
+  movementType:
+    | 'INGRESO_PROVEEDOR'
+    | 'DEVOLUCION_INSUMOS'
+    | 'REGULARIZACION_AUTORIZADA'
+    | 'APERTURA_INICIAL';
   warehouseId: number;
   locationId: number;
   supplierOrContainer: string;
+  reason?: string;
   notes: string;
   lines: {
     productId: number;
@@ -243,9 +318,10 @@ export async function registerGoodsReceipt(params: {
       privateNotes?: string;
     };
   }[];
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -253,7 +329,24 @@ export async function registerGoodsReceipt(params: {
         throw new Error('El ingreso debe incluir al menos una línea de producto.');
       }
 
-      const folio = generateFolio(params.movementType === 'APERTURA_INICIAL' ? 'APE' : 'ING');
+      const prefix =
+        params.movementType === 'APERTURA_INICIAL'
+          ? 'APE'
+          : params.movementType === 'DEVOLUCION_INSUMOS'
+          ? 'DEV'
+          : params.movementType === 'REGULARIZACION_AUTORIZADA'
+          ? 'REG'
+          : 'ING';
+      const folio = generateFolio(prefix);
+
+      const defaultReason =
+        params.movementType === 'APERTURA_INICIAL'
+          ? 'Apertura inicial auditada'
+          : params.movementType === 'DEVOLUCION_INSUMOS'
+          ? 'Devolución de insumos no utilizados'
+          : params.movementType === 'REGULARIZACION_AUTORIZADA'
+          ? 'Regularización autorizada de inventario'
+          : 'Recepción de mercancía / proveedor';
 
       const [doc] = await tx
         .insert(inventoryMovementDocuments)
@@ -263,8 +356,8 @@ export async function registerGoodsReceipt(params: {
           status: 'CONFIRMED',
           destWarehouseId: params.warehouseId,
           destLocationId: params.locationId,
-          supplierOrContainer: params.supplierOrContainer || 'Proveedor General',
-          reason: params.movementType === 'APERTURA_INICIAL' ? 'Apertura inicial auditada' : 'Recepción de proveedor/contenedor',
+          supplierOrContainer: params.supplierOrContainer || 'Ingreso Directo',
+          reason: params.reason || defaultReason,
           notes: params.notes || '',
           createdByUserId: params.userId,
           confirmedByUserId: params.userId,
@@ -284,7 +377,7 @@ export async function registerGoodsReceipt(params: {
         lotCode: line.lotCode || folio,
       }));
 
-      await applyTransitionsInTx(tx, doc.id, transitions);
+      const snapshots = await applyTransitionsInTx(tx, doc.id, transitions);
 
       // Record optional private cost batches if provided by Owner
       for (const line of params.lines) {
@@ -316,26 +409,184 @@ export async function registerGoodsReceipt(params: {
         }
       }
 
+      const firstSnap = snapshots[0];
       const result = {
         document: doc,
         folio: doc.folio,
         serverTimestamp: doc.serverTimestamp,
         linesProcessed: params.lines.length,
+        snapshots,
+        stockBefore: firstSnap?.toStockBefore ?? 0,
+        quantityAdded: firstSnap?.quantity ?? 0,
+        stockAfter: firstSnap?.toStockAfter ?? 0,
       };
 
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, params.movementType, result);
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        params.movementType,
+        result
+      );
       return result;
     });
   } catch (error: any) {
     console.error('Error in registerGoodsReceipt:', error);
-    throw new Error(error.message || 'No se pudo procesar el documento de ingreso.', { cause: error });
+    throw new Error(error.message || 'No se pudo procesar el documento de ingreso.', {
+      cause: error,
+    });
   }
 }
 
 /**
- * 2. Create Production Order & Reserve Strategic Components
- * CRITICAL TIMING RULE: Reserving moves stock from AVAILABLE -> RESERVED_ORDER in origin warehouse.
- * It does NOT consume or duplicate units.
+ * 1B. RETIRAR STOCK (Fast & Audited Withdrawal of Supplies, Packaging, Cases, Adapters, etc.)
+ * CRITICAL ACCOUNTING RULE:
+ * - Deducts immediately from AVAILABLE stock in the selected warehouse/location.
+ * - When withdrawalMode === 'ORDEN_PRODUCCION', binds the withdrawal to `productionOrderId`
+ *   so that subsequent production registration references these withdrawn supplies WITHOUT
+ *   ever deducting them a second time.
+ */
+export async function withdrawInventoryStock(params: {
+  idempotencyKey: string;
+  userId: number;
+  warehouseId: number;
+  locationId: number;
+  productId: number;
+  quantity: number;
+  withdrawalMode: 'ORDEN_PRODUCCION' | 'CONSUMO_OPERATIVO' | 'MERMA_DANO';
+  productionOrderId?: number;
+  recipientOrTarget?: string;
+  reason: string;
+  notes?: string;
+  externalTx?: DbTx;
+}) {
+  try {
+    return await runInTx(params.externalTx, async (tx) => {
+      const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
+      if (cached) return { ...cached, idempotentReplay: true };
+
+      if (!Number.isInteger(params.quantity) || params.quantity <= 0) {
+        throw new Error('La cantidad a retirar debe ser un número entero positivo mayor a cero.');
+      }
+
+      let linkedOrderId: number | null = null;
+      let orderNumberLabel = '';
+
+      if (params.withdrawalMode === 'ORDEN_PRODUCCION') {
+        if (!params.productionOrderId) {
+          throw new Error(
+            'Debe seleccionar una Orden de Producción activa para retirar insumos destinados a producción.'
+          );
+        }
+        const orders = await tx
+          .select()
+          .from(productionOrders)
+          .where(eq(productionOrders.id, params.productionOrderId));
+        const order = orders[0];
+        if (!order) {
+          throw new Error('La Orden de Producción seleccionada no existe.');
+        }
+        if (order.status === 'CLOSED' || order.status === 'CANCELLED') {
+          throw new Error(
+            `La orden ${order.orderNumber} está cerrada o cancelada y no admite nuevos retiros de insumos.`
+          );
+        }
+        linkedOrderId = order.id;
+        orderNumberLabel = order.orderNumber;
+      } else {
+        if (!params.reason || params.reason.trim().length < 3) {
+          throw new Error('Debe ingresar un motivo o justificación válida para el retiro.');
+        }
+      }
+
+      const movementType =
+        params.withdrawalMode === 'ORDEN_PRODUCCION'
+          ? 'RETIRO_PRODUCCION'
+          : params.withdrawalMode === 'MERMA_DANO'
+          ? 'RETIRO_MERMA'
+          : 'RETIRO_OPERATIVO';
+
+      const prefix =
+        params.withdrawalMode === 'ORDEN_PRODUCCION'
+          ? 'RET-OP'
+          : params.withdrawalMode === 'MERMA_DANO'
+          ? 'MER'
+          : 'RET';
+
+      const folio = generateFolio(prefix);
+
+      const computedReason =
+        params.withdrawalMode === 'ORDEN_PRODUCCION'
+          ? `Retiro de insumos para Orden ${orderNumberLabel}${
+              params.reason ? `: ${params.reason}` : ''
+            }`
+          : params.reason.trim();
+
+      const [doc] = await tx
+        .insert(inventoryMovementDocuments)
+        .values({
+          folio,
+          movementType,
+          status: 'CONFIRMED',
+          sourceWarehouseId: params.warehouseId,
+          sourceLocationId: params.locationId,
+          productionOrderId: linkedOrderId,
+          recipientOrTarget:
+            params.recipientOrTarget?.trim() ||
+            (orderNumberLabel ? `Orden ${orderNumberLabel}` : 'Uso Operativo'),
+          reason: computedReason,
+          notes: params.notes || '',
+          createdByUserId: params.userId,
+          confirmedByUserId: params.userId,
+          idempotencyKey: params.idempotencyKey,
+        })
+        .returning();
+
+      const snapshots = await applyTransitionsInTx(tx, doc.id, [
+        {
+          productId: params.productId,
+          quantity: params.quantity,
+          from: {
+            warehouseId: params.warehouseId,
+            locationId: params.locationId,
+            status: 'AVAILABLE',
+            orderId: 0,
+          },
+          targetOrderIdForAudit: linkedOrderId ?? 0,
+          lotCode: orderNumberLabel || folio,
+        },
+      ]);
+
+      const snap = snapshots[0];
+      const result = {
+        document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
+        movementType,
+        productionOrderId: linkedOrderId,
+        orderNumber: orderNumberLabel || null,
+        stockBefore: snap?.fromStockBefore ?? 0,
+        quantityWithdrawn: params.quantity,
+        stockAfter: snap?.fromStockAfter ?? 0,
+        snapshot: snap,
+      };
+
+      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, movementType, result);
+      return result;
+    });
+  } catch (error: any) {
+    console.error('Error in withdrawInventoryStock:', error);
+    throw new Error(error.message || 'No se pudo procesar el retiro de inventario.', {
+      cause: error,
+    });
+  }
+}
+
+/**
+ * 2. Create Production Order & Deliver/Reserve Strategic Components
+ * Supports `autoDispatch: true` (default) so that creating the order immediately
+ * moves the strategic components (UDP / microSD) from origin AVAILABLE -> IN_TRANSIT_PRODUCTION
+ * (or RESERVED_ORDER if autoDispatch is false), ready for the operator to accept delivery.
  */
 export async function createProductionOrderWithReservation(params: {
   idempotencyKey: string;
@@ -347,27 +598,30 @@ export async function createProductionOrderWithReservation(params: {
   assignedUserId: number;
   strategicProductId: number;
   authorizedQty: number;
-  allowedRecipeIds: number[];
-  priority: string;
-  instructions: string;
+  allowedRecipeIds?: number[];
+  priority?: string;
+  instructions?: string;
+  autoDispatch?: boolean;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
       if (!Number.isInteger(params.authorizedQty) || params.authorizedQty <= 0) {
-        throw new Error('La cantidad autorizada debe ser un entero positivo.');
+        throw new Error('La cantidad autorizada debe ser un número entero positivo.');
       }
 
+      const shouldAutoDispatch = params.autoDispatch !== false;
       const orderNumber = generateFolio('OP');
-      const docFolio = generateFolio('RES');
+      const docFolio = generateFolio(shouldAutoDispatch ? 'DESP-OP' : 'RES');
 
       const [order] = await tx
         .insert(productionOrders)
         .values({
           orderNumber,
-          status: 'RESERVED',
+          status: shouldAutoDispatch ? 'DISPATCHED' : 'RESERVED',
           sourceWarehouseId: params.sourceWarehouseId,
           sourceLocationId: params.sourceLocationId,
           targetWarehouseId: params.targetWarehouseId,
@@ -375,8 +629,9 @@ export async function createProductionOrderWithReservation(params: {
           assignedUserId: params.assignedUserId,
           strategicProductId: params.strategicProductId,
           authorizedQty: params.authorizedQty,
-          reservedQty: params.authorizedQty,
-          allowedRecipeIds: params.allowedRecipeIds,
+          reservedQty: shouldAutoDispatch ? 0 : params.authorizedQty,
+          dispatchedQty: shouldAutoDispatch ? params.authorizedQty : 0,
+          allowedRecipeIds: params.allowedRecipeIds || [],
           priority: params.priority || 'NORMAL',
           instructions: params.instructions || '',
           createdByUserId: params.userId,
@@ -387,14 +642,20 @@ export async function createProductionOrderWithReservation(params: {
         .insert(inventoryMovementDocuments)
         .values({
           folio: docFolio,
-          movementType: 'RESERVA_OP',
+          movementType: shouldAutoDispatch ? 'DESPACHO_OP' : 'RESERVA_OP',
           status: 'CONFIRMED',
           sourceWarehouseId: params.sourceWarehouseId,
           sourceLocationId: params.sourceLocationId,
-          destWarehouseId: params.sourceWarehouseId,
-          destLocationId: params.sourceLocationId,
+          destWarehouseId: shouldAutoDispatch
+            ? params.targetWarehouseId
+            : params.sourceWarehouseId,
+          destLocationId: shouldAutoDispatch
+            ? params.targetLocationId
+            : params.sourceLocationId,
           productionOrderId: order.id,
-          reason: `Reserva lógica para Orden de Producción ${orderNumber}`,
+          reason: shouldAutoDispatch
+            ? `Apertura y envío de componente estratégico a producción (${orderNumber})`
+            : `Reserva lógica para Orden de Producción ${orderNumber}`,
           notes: params.instructions || '',
           createdByUserId: params.userId,
           confirmedByUserId: params.userId,
@@ -402,7 +663,7 @@ export async function createProductionOrderWithReservation(params: {
         })
         .returning();
 
-      await applyTransitionsInTx(tx, doc.id, [
+      const snapshots = await applyTransitionsInTx(tx, doc.id, [
         {
           productId: params.strategicProductId,
           quantity: params.authorizedQty,
@@ -412,23 +673,59 @@ export async function createProductionOrderWithReservation(params: {
             status: 'AVAILABLE',
             orderId: 0,
           },
-          to: {
-            warehouseId: params.sourceWarehouseId,
-            locationId: params.sourceLocationId,
-            status: 'RESERVED_ORDER',
-            orderId: order.id,
-          },
+          to: shouldAutoDispatch
+            ? {
+                warehouseId: params.targetWarehouseId,
+                locationId: params.targetLocationId,
+                status: 'IN_TRANSIT_PRODUCTION',
+                orderId: order.id,
+              }
+            : {
+                warehouseId: params.sourceWarehouseId,
+                locationId: params.sourceLocationId,
+                status: 'RESERVED_ORDER',
+                orderId: order.id,
+              },
           lotCode: orderNumber,
         },
       ]);
 
-      const result = { order, reservationDocument: doc };
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'RESERVA_OP', result);
+      let dispatchRow = null;
+      if (shouldAutoDispatch) {
+        const [disp] = await tx
+          .insert(productionDispatches)
+          .values({
+            dispatchFolio: docFolio,
+            productionOrderId: order.id,
+            productId: params.strategicProductId,
+            dispatchedQty: params.authorizedQty,
+            status: 'IN_TRANSIT',
+            dispatchedByUserId: params.userId,
+          })
+          .returning();
+        dispatchRow = disp;
+      }
+
+      const result = {
+        order,
+        reservationDocument: doc,
+        dispatch: dispatchRow,
+        snapshots,
+      };
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        shouldAutoDispatch ? 'DESPACHO_OP' : 'RESERVA_OP',
+        result
+      );
       return result;
     });
   } catch (error: any) {
     console.error('Error in createProductionOrderWithReservation:', error);
-    throw new Error(error.message || 'No se pudo crear la orden de producción.', { cause: error });
+    throw new Error(error.message || 'No se pudo crear la orden de producción.', {
+      cause: error,
+    });
   }
 }
 
@@ -442,9 +739,10 @@ export async function dispatchProductionOrderComponents(params: {
   productionOrderId: number;
   dispatchQty: number;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -535,14 +833,16 @@ export async function dispatchProductionOrderComponents(params: {
     });
   } catch (error: any) {
     console.error('Error in dispatchProductionOrderComponents:', error);
-    throw new Error(error.message || 'Error al despachar componentes a producción.', { cause: error });
+    throw new Error(error.message || 'Error al despachar componentes a producción.', {
+      cause: error,
+    });
   }
 }
 
 /**
  * 4. Accept Dispatched Components in Production (Supports Physical Discrepancy e.g. 1,980 of 2,000)
  * Received units move from IN_TRANSIT_PRODUCTION -> IN_PRODUCTION_CUSTODY.
- * Any missing difference moves from IN_TRANSIT_PRODUCTION -> DISCREPANCY_HOLD and blocks normal order closure.
+ * Any missing difference moves from IN_TRANSIT_PRODUCTION -> DISCREPANCY_HOLD.
  */
 export async function acknowledgeProductionDispatch(params: {
   idempotencyKey: string;
@@ -550,9 +850,10 @@ export async function acknowledgeProductionDispatch(params: {
   dispatchId: number;
   receivedQty: number;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -567,7 +868,11 @@ export async function acknowledgeProductionDispatch(params: {
         throw new Error('Este despacho ya fue recibido y procesado anteriormente.');
       }
 
-      if (!Number.isInteger(params.receivedQty) || params.receivedQty < 0 || params.receivedQty > dispatchRow.dispatchedQty) {
+      if (
+        !Number.isInteger(params.receivedQty) ||
+        params.receivedQty < 0 ||
+        params.receivedQty > dispatchRow.dispatchedQty
+      ) {
         throw new Error(
           `La cantidad recibida (${params.receivedQty}) debe estar entre 0 y la cantidad enviada (${dispatchRow.dispatchedQty}).`
         );
@@ -647,7 +952,7 @@ export async function acknowledgeProductionDispatch(params: {
         });
       }
 
-      await applyTransitionsInTx(tx, doc.id, transitions);
+      const snapshots = await applyTransitionsInTx(tx, doc.id, transitions);
 
       const [updatedDispatch] = await tx
         .update(productionDispatches)
@@ -673,41 +978,53 @@ export async function acknowledgeProductionDispatch(params: {
         .where(eq(productionOrders.id, order.id))
         .returning();
 
-      const result = { dispatch: updatedDispatch, order: updatedOrder, document: doc };
+      const result = {
+        dispatch: updatedDispatch,
+        order: updatedOrder,
+        document: doc,
+        snapshots,
+      };
       await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'ACEPTACION_OP', result);
       return result;
     });
   } catch (error: any) {
     console.error('Error in acknowledgeProductionDispatch:', error);
-    throw new Error(error.message || 'No se pudo confirmar la recepción en producción.', { cause: error });
+    throw new Error(error.message || 'No se pudo confirmar la recepción en producción.', {
+      cause: error,
+    });
   }
 }
 
 /**
- * 5. Register Real Production Batch(es) & Atomic BOM Deduction
- * Supports producing 1 or multiple authorized models in a single atomic transaction.
- * - Strategic component (UDP / microSD) is consumed from IN_PRODUCTION_CUSTODY for that order.
- * - Secondary components (cases, universal SD adapters, packaging kits) are consumed from AVAILABLE in the target workshop location.
- * - Finished goods are created in FINISHED_PENDING_PICKUP bound to the order.
- * If ANY component is missing by even 1 unit, the entire transaction rolls back.
+ * 5. Register Real Production Batch(es) WITHOUT Recipes (v2.0 Architecture)
+ * - Supports producing 1 or multiple finished product models/brands in a single atomic transaction
+ *   (e.g., 1,000 USB HP 8 GB + 1,500 USB Sony 8 GB + 1,000 USB Samsung 8 GB = 3,500 finished units).
+ * - Consumes the declared `strategicQtyConsumed` (default 1:1 with `quantityProduced`) from
+ *   `IN_PRODUCTION_CUSTODY` of the order's strategic product (UDP / microSD).
+ * - Creates the finished goods in `FINISHED_PENDING_PICKUP` bound to the order.
+ * - Links/references any secondary supplies already withdrawn for this order via `usedWithdrawalFolios`
+ *   WITHOUT ever deducting secondary supplies a second time!
  */
 export async function registerProductionBatches(params: {
   idempotencyKey: string;
   userId: number;
   productionOrderId: number;
   items: {
-    recipeId: number;
-    quantityToProduce: number;
+    finishedProductId: number;
+    quantityProduced: number;
+    strategicQtyConsumed?: number;
+    usedWithdrawalFolios?: string[];
     notes?: string;
   }[];
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
       if (!params.items || params.items.length === 0) {
-        throw new Error('Debe especificar al menos un lote/modelo de producción.');
+        throw new Error('Debe especificar al menos un producto terminado fabricado.');
       }
 
       const orders = await tx
@@ -718,7 +1035,9 @@ export async function registerProductionBatches(params: {
       const order = orders[0];
       if (!order) throw new Error('Orden de producción no encontrada.');
       if (order.status === 'CLOSED' || order.status === 'CANCELLED') {
-        throw new Error(`La orden ${order.orderNumber} está cerrada o anulada y no admite nuevos lotes.`);
+        throw new Error(
+          `La orden ${order.orderNumber} está cerrada o anulada y no admite nuevos registros de producción.`
+        );
       }
 
       const pendingCustodyBalance =
@@ -736,8 +1055,11 @@ export async function registerProductionBatches(params: {
           destWarehouseId: order.targetWarehouseId,
           destLocationId: order.targetLocationId,
           productionOrderId: order.id,
-          reason: `Transformación y consumo por receta en orden ${order.orderNumber}`,
-          notes: params.items.map((i) => i.notes || '').filter(Boolean).join('; '),
+          reason: `Registro de producción terminada en orden ${order.orderNumber}`,
+          notes: params.items
+            .map((i) => i.notes || '')
+            .filter(Boolean)
+            .join('; '),
           createdByUserId: params.userId,
           confirmedByUserId: params.userId,
           idempotencyKey: params.idempotencyKey,
@@ -745,105 +1067,58 @@ export async function registerProductionBatches(params: {
         .returning();
 
       let totalStrategicConsumed = 0;
+      let totalFinishedProduced = 0;
       const transitions: LedgerTransition[] = [];
       const createdBatches = [];
 
       for (const item of params.items) {
-        if (!Number.isInteger(item.quantityToProduce) || item.quantityToProduce <= 0) {
-          throw new Error('La cantidad a producir debe ser un número entero positivo.');
+        const qtyProd = Number(item.quantityProduced);
+        if (!Number.isInteger(qtyProd) || qtyProd <= 0) {
+          throw new Error('La cantidad producida debe ser un número entero positivo.');
         }
 
-        // Verify recipe is allowed for this order (if order specifies allowedRecipeIds)
-        if (
-          order.allowedRecipeIds &&
-          order.allowedRecipeIds.length > 0 &&
-          !order.allowedRecipeIds.includes(item.recipeId)
-        ) {
+        const stratConsumed =
+          item.strategicQtyConsumed !== undefined
+            ? Number(item.strategicQtyConsumed)
+            : qtyProd;
+
+        if (!Number.isInteger(stratConsumed) || stratConsumed <= 0) {
           throw new Error(
-            `La receta ID ${item.recipeId} no está autorizada dentro de la orden ${order.orderNumber}. Solicite autorización del propietario.`
+            'La cantidad de componente estratégico consumido debe ser un número entero positivo.'
           );
         }
 
-        const recipeRows = await tx
+        const finProdRows = await tx
           .select()
-          .from(recipes)
-          .where(eq(recipes.id, item.recipeId));
-        const recipe = recipeRows[0];
-        if (!recipe || !recipe.isActive) {
-          throw new Error(`La receta ID ${item.recipeId} no existe o está inactiva.`);
-        }
-
-        const versionRows = await tx
-          .select()
-          .from(recipeVersions)
-          .where(
-            and(
-              eq(recipeVersions.recipeId, recipe.id),
-              eq(recipeVersions.isCurrent, true)
-            )
-          );
-        const version = versionRows[0];
-        if (!version) {
-          throw new Error(`No se encontró una versión activa para la receta ${recipe.code}.`);
-        }
-
-        const bomLines = await tx
-          .select()
-          .from(recipeComponents)
-          .where(eq(recipeComponents.recipeVersionId, version.id));
-
-        if (bomLines.length === 0) {
-          throw new Error(`La receta ${recipe.code} no tiene componentes configurados.`);
-        }
-
-        // Verify strategic component matches order's strategic product
-        const hasStrategicMatch = bomLines.some(
-          (b) => b.componentProductId === order.strategicProductId
-        );
-        if (!hasStrategicMatch) {
+          .from(products)
+          .where(eq(products.id, Number(item.finishedProductId)));
+        const finProd = finProdRows[0];
+        if (!finProd) {
           throw new Error(
-            `La receta ${recipe.code} no utiliza el componente estratégico asignado a la orden ${order.orderNumber}.`
+            `El producto terminado seleccionado (ID ${item.finishedProductId}) no existe en el catálogo.`
           );
         }
 
-        for (const bom of bomLines) {
-          const requiredQty = bom.quantityPerUnit * item.quantityToProduce;
-          const isStrategic =
-            bom.isStrategicOrderBound || bom.componentProductId === order.strategicProductId;
+        totalStrategicConsumed += stratConsumed;
+        totalFinishedProduced += qtyProd;
 
-          if (isStrategic) {
-            totalStrategicConsumed += requiredQty;
-            transitions.push({
-              productId: bom.componentProductId,
-              quantity: requiredQty,
-              from: {
-                warehouseId: order.targetWarehouseId,
-                locationId: order.targetLocationId,
-                status: 'IN_PRODUCTION_CUSTODY',
-                orderId: order.id,
-              },
-              lotCode: order.orderNumber,
-            });
-          } else {
-            // Secondary component (case, universal SD adapter, packaging kit) consumed from local AVAILABLE stock
-            transitions.push({
-              productId: bom.componentProductId,
-              quantity: requiredQty,
-              from: {
-                warehouseId: order.targetWarehouseId,
-                locationId: order.targetLocationId,
-                status: 'AVAILABLE',
-                orderId: 0,
-              },
-              lotCode: order.orderNumber,
-            });
-          }
-        }
-
-        // Output finished product in FINISHED_PENDING_PICKUP bound to order
+        // 1. Deduct strategic component (UDP / microSD) from IN_PRODUCTION_CUSTODY of this order
         transitions.push({
-          productId: recipe.finishedProductId,
-          quantity: item.quantityToProduce,
+          productId: order.strategicProductId,
+          quantity: stratConsumed,
+          from: {
+            warehouseId: order.targetWarehouseId,
+            locationId: order.targetLocationId,
+            status: 'IN_PRODUCTION_CUSTODY',
+            orderId: order.id,
+          },
+          lotCode: order.orderNumber,
+        });
+
+        // 2. Create finished product in FINISHED_PENDING_PICKUP bound to this order
+        transitions.push({
+          productId: finProd.id,
+          quantity: qtyProd,
           to: {
             warehouseId: order.targetWarehouseId,
             locationId: order.targetLocationId,
@@ -854,18 +1129,24 @@ export async function registerProductionBatches(params: {
         });
 
         const batchFolio = generateFolio('LOTE');
+        const usedFoliosStr = Array.isArray(item.usedWithdrawalFolios)
+          ? item.usedWithdrawalFolios.join(', ')
+          : '';
+
         const [batch] = await tx
           .insert(productionBatches)
           .values({
             batchFolio,
             productionOrderId: order.id,
-            recipeId: recipe.id,
-            recipeVersionId: version.id,
-            finishedProductId: recipe.finishedProductId,
+            recipeId: null,
+            recipeVersionId: null,
+            finishedProductId: finProd.id,
             warehouseId: order.targetWarehouseId,
             locationId: order.targetLocationId,
-            quantityProduced: item.quantityToProduce,
+            quantityProduced: qtyProd,
+            strategicQtyConsumed: stratConsumed,
             quantityPickedUp: 0,
+            usedWithdrawalFolios: usedFoliosStr,
             movementDocumentId: doc.id,
             operatorUserId: params.userId,
             notes: item.notes || '',
@@ -877,12 +1158,12 @@ export async function registerProductionBatches(params: {
 
       if (totalStrategicConsumed > pendingCustodyBalance) {
         throw new Error(
-          `Intento de sobreconsumo en orden ${order.orderNumber}: se requieren ${totalStrategicConsumed} unidades del componente estratégico, pero solo hay ${pendingCustodyBalance} unidades bajo custodia de producción.`
+          `Intento de sobreconsumo en orden ${order.orderNumber}: se requieren ${totalStrategicConsumed} unidades del componente estratégico en custodia, pero solo hay ${pendingCustodyBalance} unidades disponibles en esta orden.`
         );
       }
 
       // Execute all balance locks, deductions, and creations atomically
-      await applyTransitionsInTx(tx, doc.id, transitions);
+      const snapshots = await applyTransitionsInTx(tx, doc.id, transitions);
 
       const newConsumed = order.consumedQty + totalStrategicConsumed;
       const remainingAfter =
@@ -892,25 +1173,40 @@ export async function registerProductionBatches(params: {
         .update(productionOrders)
         .set({
           consumedQty: newConsumed,
-          status: remainingAfter === 0 && order.reservedQty === 0 ? 'COMPLETED_PENDING_PICKUP' : 'PARTIALLY_COMPLETED',
+          status:
+            remainingAfter === 0 && order.reservedQty === 0
+              ? 'COMPLETED_PENDING_PICKUP'
+              : 'PARTIALLY_COMPLETED',
         })
         .where(eq(productionOrders.id, order.id))
         .returning();
 
       const result = {
         document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
         batches: createdBatches,
         order: updatedOrder,
         totalStrategicConsumed,
+        totalFinishedProduced,
         remainingCustodyQty: remainingAfter,
+        snapshots,
       };
 
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'PRODUCCION_LOTE', result);
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        'PRODUCCION_LOTE',
+        result
+      );
       return result;
     });
   } catch (error: any) {
     console.error('Error in registerProductionBatches:', error);
-    throw new Error(error.message || 'Fallo en el registro atómico de producción.', { cause: error });
+    throw new Error(error.message || 'Fallo en el registro atómico de producción.', {
+      cause: error,
+    });
   }
 }
 
@@ -924,16 +1220,17 @@ export async function returnOrWasteOrderComponents(params: {
   operationType: 'RETURN_TO_ORIGIN' | 'REPORT_WASTE';
   quantity: number;
   reason: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
       if (!Number.isInteger(params.quantity) || params.quantity <= 0) {
         throw new Error('La cantidad debe ser un entero positivo.');
       }
-      if (!params.reason || params.reason.trim().length < 4) {
+      if (!params.reason || params.reason.trim().length < 3) {
         throw new Error('Debe especificar un motivo claro para la devolución o merma.');
       }
 
@@ -949,12 +1246,12 @@ export async function returnOrWasteOrderComponents(params: {
         order.receivedInProductionQty - order.consumedQty - order.returnedQty - order.wasteQty;
       if (params.quantity > pendingCustody) {
         throw new Error(
-          `Cantidad (${params.quantity}) excede el saldo bajo custodia en producción (${pendingCustody}).`
+          `La cantidad (${params.quantity}) excede el saldo en custodia de producción (${pendingCustody}).`
         );
       }
 
       const isReturn = params.operationType === 'RETURN_TO_ORIGIN';
-      const folio = generateFolio(isReturn ? 'RET-OP' : 'MER-OP');
+      const folio = generateFolio(isReturn ? 'DEV-OP' : 'MER-OP');
 
       const [doc] = await tx
         .insert(inventoryMovementDocuments)
@@ -975,7 +1272,7 @@ export async function returnOrWasteOrderComponents(params: {
         })
         .returning();
 
-      await applyTransitionsInTx(tx, doc.id, [
+      const snapshots = await applyTransitionsInTx(tx, doc.id, [
         {
           productId: order.strategicProductId,
           quantity: params.quantity,
@@ -1002,22 +1299,39 @@ export async function returnOrWasteOrderComponents(params: {
         },
       ]);
 
+      const newReturned = isReturn ? order.returnedQty + params.quantity : order.returnedQty;
+      const newWaste = !isReturn ? order.wasteQty + params.quantity : order.wasteQty;
+      const remainingCustody =
+        order.receivedInProductionQty - order.consumedQty - newReturned - newWaste;
+
       const [updatedOrder] = await tx
         .update(productionOrders)
         .set({
-          returnedQty: isReturn ? order.returnedQty + params.quantity : order.returnedQty,
-          wasteQty: !isReturn ? order.wasteQty + params.quantity : order.wasteQty,
+          returnedQty: newReturned,
+          wasteQty: newWaste,
+          status:
+            remainingCustody === 0 && order.reservedQty === 0
+              ? 'COMPLETED_PENDING_PICKUP'
+              : order.status,
         })
         .where(eq(productionOrders.id, order.id))
         .returning();
 
-      const result = { order: updatedOrder, document: doc };
+      const result = {
+        order: updatedOrder,
+        document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
+        snapshots,
+      };
       await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, doc.movementType, result);
       return result;
     });
   } catch (error: any) {
     console.error('Error in returnOrWasteOrderComponents:', error);
-    throw new Error(error.message || 'No se pudo procesar la devolución o merma.', { cause: error });
+    throw new Error(error.message || 'No se pudo procesar la devolución o merma.', {
+      cause: error,
+    });
   }
 }
 
@@ -1026,6 +1340,7 @@ export async function returnOrWasteOrderComponents(params: {
  * CRITICAL INVARIANT: Picking up finished goods NEVER deducts UDP, cases, adapters, or packaging again.
  * It only transfers custody of the finished SKU:
  * FINISHED_PENDING_PICKUP -> FINISHED_IN_TRANSIT -> AVAILABLE (in destination warehouse).
+ * Supports `autoReceive: true` when the owner/receiver picks up and confirms reception in one step.
  */
 export async function dispatchFinishedGoods(params: {
   idempotencyKey: string;
@@ -1035,10 +1350,12 @@ export async function dispatchFinishedGoods(params: {
   toWarehouseId: number;
   toLocationId: number;
   dispatchQty: number;
+  autoReceive?: boolean;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -1051,19 +1368,22 @@ export async function dispatchFinishedGoods(params: {
       if (!order) throw new Error('Orden de producción no encontrada.');
 
       const folio = generateFolio('ENT-TERM');
+      const immediateReceive = Boolean(params.autoReceive);
 
       const [doc] = await tx
         .insert(inventoryMovementDocuments)
         .values({
           folio,
-          movementType: 'DESPACHO_TERMINADO',
+          movementType: immediateReceive ? 'RECEPCION_TERMINADO' : 'DESPACHO_TERMINADO',
           status: 'CONFIRMED',
           sourceWarehouseId: order.targetWarehouseId,
           sourceLocationId: order.targetLocationId,
           destWarehouseId: params.toWarehouseId,
           destLocationId: params.toLocationId,
           productionOrderId: order.id,
-          reason: `Entrega de producto terminado de orden ${order.orderNumber}`,
+          reason: immediateReceive
+            ? `Recogida y recepción confirmada de producto terminado (${order.orderNumber})`
+            : `Entrega de producto terminado de orden ${order.orderNumber}`,
           notes: params.notes || '',
           createdByUserId: params.userId,
           confirmedByUserId: params.userId,
@@ -1071,7 +1391,7 @@ export async function dispatchFinishedGoods(params: {
         })
         .returning();
 
-      await applyTransitionsInTx(tx, doc.id, [
+      const snapshots = await applyTransitionsInTx(tx, doc.id, [
         {
           productId: params.finishedProductId,
           quantity: params.dispatchQty,
@@ -1084,8 +1404,8 @@ export async function dispatchFinishedGoods(params: {
           to: {
             warehouseId: params.toWarehouseId,
             locationId: params.toLocationId,
-            status: 'FINISHED_IN_TRANSIT',
-            orderId: order.id,
+            status: immediateReceive ? 'AVAILABLE' : 'FINISHED_IN_TRANSIT',
+            orderId: immediateReceive ? 0 : order.id,
           },
           lotCode: order.orderNumber,
         },
@@ -1102,19 +1422,61 @@ export async function dispatchFinishedGoods(params: {
           toWarehouseId: params.toWarehouseId,
           toLocationId: params.toLocationId,
           dispatchedQty: params.dispatchQty,
-          status: 'IN_TRANSIT',
+          receivedQty: immediateReceive ? params.dispatchQty : null,
+          discrepancyQty: 0,
+          status: immediateReceive ? 'RECEIVED' : 'IN_TRANSIT',
           dispatchedByUserId: params.userId,
+          receivedByUserId: immediateReceive ? params.userId : null,
+          receivedAt: immediateReceive ? new Date() : null,
           notes: params.notes || '',
         })
         .returning();
 
-      const result = { dispatch: dispatchRow, document: doc };
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'DESPACHO_TERMINADO', result);
+      // Update quantityPickedUp across batches of this order and product
+      const batches = await tx
+        .select()
+        .from(productionBatches)
+        .where(
+          and(
+            eq(productionBatches.productionOrderId, order.id),
+            eq(productionBatches.finishedProductId, params.finishedProductId)
+          )
+        );
+      let remToMark = params.dispatchQty;
+      for (const b of batches) {
+        if (remToMark <= 0) break;
+        const canPick = b.quantityProduced - b.quantityPickedUp;
+        if (canPick > 0) {
+          const addPick = Math.min(canPick, remToMark);
+          remToMark -= addPick;
+          await tx
+            .update(productionBatches)
+            .set({ quantityPickedUp: b.quantityPickedUp + addPick })
+            .where(eq(productionBatches.id, b.id));
+        }
+      }
+
+      const result = {
+        dispatch: dispatchRow,
+        document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
+        snapshots,
+      };
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        immediateReceive ? 'RECEPCION_TERMINADO' : 'DESPACHO_TERMINADO',
+        result
+      );
       return result;
     });
   } catch (error: any) {
     console.error('Error in dispatchFinishedGoods:', error);
-    throw new Error(error.message || 'No se pudo despachar el producto terminado.', { cause: error });
+    throw new Error(error.message || 'No se pudo despachar el producto terminado.', {
+      cause: error,
+    });
   }
 }
 
@@ -1124,9 +1486,10 @@ export async function receiveFinishedGoods(params: {
   dispatchId: number;
   receivedQty: number;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -1217,7 +1580,7 @@ export async function receiveFinishedGoods(params: {
         });
       }
 
-      await applyTransitionsInTx(tx, doc.id, transitions);
+      const snapshots = await applyTransitionsInTx(tx, doc.id, transitions);
 
       const [updatedDispatch] = await tx
         .update(finishedGoodsDispatches)
@@ -1231,15 +1594,30 @@ export async function receiveFinishedGoods(params: {
         .where(eq(finishedGoodsDispatches.id, dispatchRow.id))
         .returning();
 
-      const result = { dispatch: updatedDispatch, document: doc };
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'RECEPCION_TERMINADO', result);
+      const result = {
+        dispatch: updatedDispatch,
+        document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
+        snapshots,
+      };
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        'RECEPCION_TERMINADO',
+        result
+      );
       return result;
     });
   } catch (error: any) {
     console.error('Error in receiveFinishedGoods:', error);
-    throw new Error(error.message || 'No se pudo confirmar la recepción de productos terminados.', {
-      cause: error,
-    });
+    throw new Error(
+      error.message || 'No se pudo confirmar la recepción de productos terminados.',
+      {
+        cause: error,
+      }
+    );
   }
 }
 
@@ -1256,9 +1634,10 @@ export async function createOrMoveWarehouseTransfer(params: {
   productId: number;
   quantity: number;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -1285,7 +1664,7 @@ export async function createOrMoveWarehouseTransfer(params: {
         })
         .returning();
 
-      await applyTransitionsInTx(tx, doc.id, [
+      const snapshots = await applyTransitionsInTx(tx, doc.id, [
         {
           productId: params.productId,
           quantity: params.quantity,
@@ -1325,7 +1704,18 @@ export async function createOrMoveWarehouseTransfer(params: {
         transferRow = tr;
       }
 
-      const result = { document: doc, transfer: transferRow, isInternalSameWarehouse };
+      const snap = snapshots[0];
+      const result = {
+        document: doc,
+        folio: doc.folio,
+        serverTimestamp: doc.serverTimestamp,
+        transfer: transferRow,
+        isInternalSameWarehouse,
+        stockBefore: snap?.fromStockBefore ?? 0,
+        quantityWithdrawn: params.quantity,
+        stockAfter: snap?.fromStockAfter ?? 0,
+        snapshots,
+      };
       await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, doc.movementType, result);
       return result;
     });
@@ -1341,9 +1731,10 @@ export async function receiveWarehouseTransfer(params: {
   transferId: number;
   receivedQty: number;
   notes?: string;
+  externalTx?: DbTx;
 }) {
   try {
-    return await db.transaction(async (tx) => {
+    return await runInTx(params.externalTx, async (tx) => {
       const cached = await checkIdempotencyInTx(tx, params.idempotencyKey);
       if (cached) return { ...cached, idempotentReplay: true };
 
@@ -1356,7 +1747,11 @@ export async function receiveWarehouseTransfer(params: {
       if (!tr) throw new Error('Transferencia no encontrada.');
       if (tr.status !== 'IN_TRANSIT') throw new Error('Esta transferencia ya fue recibida.');
 
-      if (!Number.isInteger(params.receivedQty) || params.receivedQty < 0 || params.receivedQty > tr.dispatchedQty) {
+      if (
+        !Number.isInteger(params.receivedQty) ||
+        params.receivedQty < 0 ||
+        params.receivedQty > tr.dispatchedQty
+      ) {
         throw new Error('Cantidad recibida inválida.');
       }
 
@@ -1421,7 +1816,7 @@ export async function receiveWarehouseTransfer(params: {
         });
       }
 
-      await applyTransitionsInTx(tx, doc.id, transitions);
+      const snapshots = await applyTransitionsInTx(tx, doc.id, transitions);
 
       const [updated] = await tx
         .update(warehouseTransfers)
@@ -1435,8 +1830,14 @@ export async function receiveWarehouseTransfer(params: {
         .where(eq(warehouseTransfers.id, tr.id))
         .returning();
 
-      const result = { transfer: updated, document: doc };
-      await saveIdempotencyInTx(tx, params.idempotencyKey, params.userId, 'TRANSFERENCIA_RECEPCION', result);
+      const result = { transfer: updated, document: doc, snapshots };
+      await saveIdempotencyInTx(
+        tx,
+        params.idempotencyKey,
+        params.userId,
+        'TRANSFERENCIA_RECEPCION',
+        result
+      );
       return result;
     });
   } catch (error: any) {
@@ -1621,11 +2022,12 @@ export async function approvePhysicalCountAdjustment(params: {
  * 2) No negative balances exist.
  * 3) Every Production Order satisfies the conservation of strategic components equation.
  */
-export async function runAccountingInvariantAudit() {
+export async function runAccountingInvariantAudit(externalTx?: DbTx) {
   try {
-    const allBalances = await db.select().from(inventoryBalances);
-    const allLines = await db.select().from(inventoryMovementLines);
-    const allOrders = await db.select().from(productionOrders);
+    const queryRunner = externalTx || db;
+    const allBalances = await queryRunner.select().from(inventoryBalances);
+    const allLines = await queryRunner.select().from(inventoryMovementLines);
+    const allOrders = await queryRunner.select().from(productionOrders);
 
     // Reconstruct balances from immutable ledger lines
     const ledgerMap = new Map<string, number>();
@@ -1679,8 +2081,6 @@ export async function runAccountingInvariantAudit() {
     }[] = [];
 
     for (const o of allOrders) {
-      // Conservation equation:
-      // authorizedQty == reservedQty + dispatchedQty
       if (o.authorizedQty !== o.reservedQty + o.dispatchedQty) {
         orderDiscrepancies.push({
           orderNumber: o.orderNumber,
@@ -1688,7 +2088,6 @@ export async function runAccountingInvariantAudit() {
         });
       }
 
-      // Check custody balance in inventory_balances for this order
       const custodyRows = allBalances.filter(
         (b) => b.productionOrderId === o.id && b.status === 'IN_PRODUCTION_CUSTODY'
       );
@@ -1716,5 +2115,460 @@ export async function runAccountingInvariantAudit() {
   } catch (error: any) {
     console.error('Error in runAccountingInvariantAudit:', error);
     throw new Error('Error al ejecutar auditoría de invariantes contables.', { cause: error });
+  }
+}
+
+class RollbackVerificationSentinel extends Error {
+  report: any;
+  constructor(report: any) {
+    super('ROLLBACK_VERIFICATION_SENTINEL');
+    this.report = report;
+  }
+}
+
+/**
+ * 11. Isolated Automated Verification of the v2.0 Inventory & Production Scenarios
+ * Runs inside a PostgreSQL transaction that ALWAYS rolls back at the end, verifying:
+ * - Ingreso de 20,000 UDP 8 GB (0 -> 20,000)
+ * - Idempotency protection (duplicate request does not double-add)
+ * - Negative stock protection (attempting to withdraw 25,000 when 20,000 available is rejected)
+ * - Nueva Orden de Producción for 4,000 UDP 8 GB (Available: 20,000 -> 16,000, In Transit/Order: 4,000, Physical Total: 20,000)
+ * - Recepción en Producción of 4,000 UDP 8 GB (In Custody: 4,000)
+ * - Retiro de Insumos (3,500 Empaques/Cases) linked to OP without double deduction
+ * - Registro de Producción multi-modelo SIN recetas:
+ *   1,000 USB HP 8 GB + 1,500 USB Sony 8 GB + 1,000 USB Samsung 8 GB = 3,500 terminados
+ *   Consuming 3,500 UDP 8 GB -> leaving 500 UDP 8 GB in custody
+ * - Recogida parcial de 2,000 USB terminados -> 2,000 disponibles en almacén destino, 1,500 pendientes de recogida, 0 doble descuento
+ * - Devolución de 500 UDP 8 GB sobrantes al almacén origen -> Disponible sube de 16,000 a 16,500 y custodia queda en 0.
+ */
+export async function runV2ScenarioVerification(userId: number) {
+  try {
+    await db.transaction(async (tx) => {
+      const steps: { step: string; passed: boolean; details: string }[] = [];
+
+      // Create isolated test warehouses & locations inside tx
+      const [whOrigin] = await tx
+        .insert(warehouses)
+        .values({
+          code: 'TEST-ALM-ORIG',
+          name: 'Almacén Principal (Test)',
+          isProductionPlant: false,
+        })
+        .returning();
+      const [locOrigin] = await tx
+        .insert(warehouseLocations)
+        .values({
+          warehouseId: whOrigin.id,
+          code: 'TEST-LOC-ORIG',
+          zoneName: 'Bodega Central',
+          shelfName: 'Estante A1',
+          isDefault: true,
+        })
+        .returning();
+
+      const [whProd] = await tx
+        .insert(warehouses)
+        .values({
+          code: 'TEST-ALM-PROD',
+          name: 'Taller de Producción (Test)',
+          isProductionPlant: true,
+        })
+        .returning();
+      const [locProd] = await tx
+        .insert(warehouseLocations)
+        .values({
+          warehouseId: whProd.id,
+          code: 'TEST-LOC-PROD',
+          zoneName: 'Área de Ensamblaje',
+          shelfName: 'Mesa 1',
+          isDefault: true,
+        })
+        .returning();
+
+      // Create isolated test products inside tx
+      const [udp8gb] = await tx
+        .insert(products)
+        .values({
+          sku: 'TEST-UDP-8GB',
+          name: 'UDP 8 GB (Componente Estratégico)',
+          normalizedKey: 'test_udp_8gb',
+          productType: 'STRATEGIC_COMPONENT',
+          family: 'Chips UDP',
+          capacity: '8 GB',
+        })
+        .returning();
+
+      const [empaqueUsb] = await tx
+        .insert(products)
+        .values({
+          sku: 'TEST-EMP-USB',
+          name: 'Empaque Blíster USB',
+          normalizedKey: 'test_emp_usb',
+          productType: 'PACKAGING_KIT',
+          family: 'Empaques',
+        })
+        .returning();
+
+      const [usbHp] = await tx
+        .insert(products)
+        .values({
+          sku: 'TEST-USB-HP-8GB',
+          name: 'USB HP 8 GB Terminado',
+          normalizedKey: 'test_usb_hp_8gb',
+          productType: 'FINISHED_GOOD',
+          family: 'Producto Terminado',
+          brand: 'HP',
+          capacity: '8 GB',
+        })
+        .returning();
+
+      const [usbSony] = await tx
+        .insert(products)
+        .values({
+          sku: 'TEST-USB-SONY-8GB',
+          name: 'USB Sony 8 GB Terminado',
+          normalizedKey: 'test_usb_sony_8gb',
+          productType: 'FINISHED_GOOD',
+          family: 'Producto Terminado',
+          brand: 'Sony',
+          capacity: '8 GB',
+        })
+        .returning();
+
+      const [usbSamsung] = await tx
+        .insert(products)
+        .values({
+          sku: 'TEST-USB-SAM-8GB',
+          name: 'USB Samsung 8 GB Terminado',
+          normalizedKey: 'test_usb_sam_8gb',
+          productType: 'FINISHED_GOOD',
+          family: 'Producto Terminado',
+          brand: 'Samsung',
+          capacity: '8 GB',
+        })
+        .returning();
+
+      // 1. Ingresar 20,000 UDP 8 GB y 10,000 Empaques
+      const ingKey = `VERIFY-ING-20000-${Date.now()}`;
+      const ingRes = await registerGoodsReceipt({
+        idempotencyKey: ingKey,
+        userId,
+        movementType: 'INGRESO_PROVEEDOR',
+        warehouseId: whOrigin.id,
+        locationId: locOrigin.id,
+        supplierOrContainer: 'Contenedor Test',
+        notes: 'Ingreso de 20,000 UDP 8 GB',
+        lines: [{ productId: udp8gb.id, quantity: 20000 }],
+        externalTx: tx,
+      });
+
+      await registerGoodsReceipt({
+        idempotencyKey: `VERIFY-ING-EMP-${Date.now()}`,
+        userId,
+        movementType: 'INGRESO_PROVEEDOR',
+        warehouseId: whProd.id,
+        locationId: locProd.id,
+        supplierOrContainer: 'Stock Taller',
+        notes: 'Ingreso de 10,000 Empaques en Taller',
+        lines: [{ productId: empaqueUsb.id, quantity: 10000 }],
+        externalTx: tx,
+      });
+
+      steps.push({
+        step: '1. Ingreso de 20,000 UDP 8 GB en Almacén Principal',
+        passed: ingRes.stockBefore === 0 && ingRes.stockAfter === 20000,
+        details: `Saldo anterior: ${ingRes.stockBefore} -> Ingreso: +20,000 -> Saldo resultante: ${ingRes.stockAfter} (Folio: ${ingRes.folio})`,
+      });
+
+      // 2. Idempotency test: repeat same idempotencyKey
+      const replayRes = await registerGoodsReceipt({
+        idempotencyKey: ingKey,
+        userId,
+        movementType: 'INGRESO_PROVEEDOR',
+        warehouseId: whOrigin.id,
+        locationId: locOrigin.id,
+        supplierOrContainer: 'Contenedor Test',
+        notes: 'Ingreso duplicado',
+        lines: [{ productId: udp8gb.id, quantity: 20000 }],
+        externalTx: tx,
+      });
+      steps.push({
+        step: '2. Protección anti-duplicados (Idempotency-Key)',
+        passed: Boolean(replayRes.idempotentReplay) && replayRes.stockAfter === 20000,
+        details: `Reintento con misma clave devolvió el mismo comprobante ${replayRes.folio} sin duplicar las 20,000 unidades.`,
+      });
+
+      // 3. Negative stock rejection test using savepoint
+      let rejectedOverWithdrawal = false;
+      try {
+        await tx.transaction(async (subTx) => {
+          await withdrawInventoryStock({
+            idempotencyKey: `VERIFY-OVER-${Date.now()}`,
+            userId,
+            warehouseId: whOrigin.id,
+            locationId: locOrigin.id,
+            productId: udp8gb.id,
+            quantity: 25000,
+            withdrawalMode: 'CONSUMO_OPERATIVO',
+            reason: 'Intento de retiro mayor al disponible',
+            externalTx: subTx,
+          });
+        });
+      } catch {
+        rejectedOverWithdrawal = true;
+      }
+      steps.push({
+        step: '3. Bloqueo de retiro superior al stock disponible',
+        passed: rejectedOverWithdrawal,
+        details: 'Intento de retirar 25,000 UDP con 20,000 disponibles fue rechazado atómicamente.',
+      });
+
+      // 4. Crear Orden de Producción por 4,000 UDP 8 GB
+      const opRes = await createProductionOrderWithReservation({
+        idempotencyKey: `VERIFY-OP-4000-${Date.now()}`,
+        userId,
+        sourceWarehouseId: whOrigin.id,
+        sourceLocationId: locOrigin.id,
+        targetWarehouseId: whProd.id,
+        targetLocationId: locProd.id,
+        assignedUserId: userId,
+        strategicProductId: udp8gb.id,
+        authorizedQty: 4000,
+        instructions: 'Armar lotes HP, Sony y Samsung 8 GB',
+        autoDispatch: true,
+        externalTx: tx,
+      });
+
+      const originBalAfterOp = await tx
+        .select()
+        .from(inventoryBalances)
+        .where(
+          and(
+            eq(inventoryBalances.productId, udp8gb.id),
+            eq(inventoryBalances.warehouseId, whOrigin.id),
+            eq(inventoryBalances.status, 'AVAILABLE')
+          )
+        );
+      const availOriginQty = originBalAfterOp[0]?.quantity ?? 0;
+
+      steps.push({
+        step: '4. Creación de Orden de Producción por 4,000 UDP 8 GB',
+        passed: availOriginQty === 16000 && opRes.order.dispatchedQty === 4000,
+        details: `Disponible en Almacén Principal bajó a ${availOriginQty} u. y 4,000 u. pasaron a la orden ${opRes.order.orderNumber} (Total físico conservado: 20,000 u.).`,
+      });
+
+      // 5. Aceptar entrega de 4,000 UDP 8 GB en Producción
+      const ackRes = await acknowledgeProductionDispatch({
+        idempotencyKey: `VERIFY-ACK-4000-${Date.now()}`,
+        userId,
+        dispatchId: opRes.dispatch!.id,
+        receivedQty: 4000,
+        notes: 'Recibido conforme en taller',
+        externalTx: tx,
+      });
+
+      steps.push({
+        step: '5. Recepción de 4,000 UDP 8 GB en custodia de producción',
+        passed: ackRes.order.receivedInProductionQty === 4000,
+        details: `En custodia de producción para ${opRes.order.orderNumber}: ${ackRes.order.receivedInProductionQty} unidades.`,
+      });
+
+      // 6. Retirar 3,500 Empaques vinculados a la Orden de Producción (Botón Retirar)
+      const withdrawRes = await withdrawInventoryStock({
+        idempotencyKey: `VERIFY-RET-3500-${Date.now()}`,
+        userId,
+        warehouseId: whProd.id,
+        locationId: locProd.id,
+        productId: empaqueUsb.id,
+        quantity: 3500,
+        withdrawalMode: 'ORDEN_PRODUCCION',
+        productionOrderId: opRes.order.id,
+        recipientOrTarget: 'Lotes HP, Sony y Samsung 8 GB',
+        reason: 'Retiro de blísteres para ensamblaje de orden',
+        externalTx: tx,
+      });
+
+      steps.push({
+        step: '6. Retiro de 3,500 Empaques mediante botón "Retirar" vinculado a la OP',
+        passed: withdrawRes.stockBefore === 10000 && withdrawRes.stockAfter === 6500,
+        details: `Empaques disponibles antes: ${withdrawRes.stockBefore} -> Retiro: -3,500 -> Disponibles después: ${withdrawRes.stockAfter} (Folio: ${withdrawRes.folio}).`,
+      });
+
+      // 7. Registrar Producción SIN recetas: 1,000 HP + 1,500 Sony + 1,000 Samsung = 3,500 terminados
+      const batchRes = await registerProductionBatches({
+        idempotencyKey: `VERIFY-PROD-3500-${Date.now()}`,
+        userId,
+        productionOrderId: opRes.order.id,
+        items: [
+          {
+            finishedProductId: usbHp.id,
+            quantityProduced: 1000,
+            strategicQtyConsumed: 1000,
+            usedWithdrawalFolios: [withdrawRes.folio],
+            notes: 'Lote HP 8 GB',
+          },
+          {
+            finishedProductId: usbSony.id,
+            quantityProduced: 1500,
+            strategicQtyConsumed: 1500,
+            usedWithdrawalFolios: [withdrawRes.folio],
+            notes: 'Lote Sony 8 GB',
+          },
+          {
+            finishedProductId: usbSamsung.id,
+            quantityProduced: 1000,
+            strategicQtyConsumed: 1000,
+            usedWithdrawalFolios: [withdrawRes.folio],
+            notes: 'Lote Samsung 8 GB',
+          },
+        ],
+        externalTx: tx,
+      });
+
+      // Verify empaques were NOT deducted a second time
+      const empBalAfterProd = await tx
+        .select()
+        .from(inventoryBalances)
+        .where(
+          and(
+            eq(inventoryBalances.productId, empaqueUsb.id),
+            eq(inventoryBalances.warehouseId, whProd.id),
+            eq(inventoryBalances.status, 'AVAILABLE')
+          )
+        );
+      const empAvailAfterProd = empBalAfterProd[0]?.quantity ?? 0;
+
+      steps.push({
+        step: '7. Registro de Producción multi-modelo SIN recetas (3,500 USB terminados) sin doble descuento',
+        passed:
+          batchRes.totalFinishedProduced === 3500 &&
+          batchRes.totalStrategicConsumed === 3500 &&
+          batchRes.remainingCustodyQty === 500 &&
+          empAvailAfterProd === 6500,
+        details: `Producidos: 3,500 USB (1,000 HP + 1,500 Sony + 1,000 Samsung). UDP consumidos: 3,500. UDP restantes en custodia: ${batchRes.remainingCustodyQty}. Empaques disponibles siguen en ${empAvailAfterProd} (0 doble descuento).`,
+      });
+
+      // 8. Recogida parcial de 2,000 USB terminados (1,000 HP + 1,000 Sony) hacia Almacén Principal
+      await dispatchFinishedGoods({
+        idempotencyKey: `VERIFY-PICKUP-HP-1000-${Date.now()}`,
+        userId,
+        productionOrderId: opRes.order.id,
+        finishedProductId: usbHp.id,
+        toWarehouseId: whOrigin.id,
+        toLocationId: locOrigin.id,
+        dispatchQty: 1000,
+        autoReceive: true,
+        notes: 'Recogida parcial 1,000 HP',
+        externalTx: tx,
+      });
+
+      await dispatchFinishedGoods({
+        idempotencyKey: `VERIFY-PICKUP-SONY-1000-${Date.now()}`,
+        userId,
+        productionOrderId: opRes.order.id,
+        finishedProductId: usbSony.id,
+        toWarehouseId: whOrigin.id,
+        toLocationId: locOrigin.id,
+        dispatchQty: 1000,
+        autoReceive: true,
+        notes: 'Recogida parcial 1,000 Sony',
+        externalTx: tx,
+      });
+
+      const allFinBals = await tx.select().from(inventoryBalances);
+      const finAvailableOrigin = allFinBals
+        .filter(
+          (b) =>
+            (b.productId === usbHp.id ||
+              b.productId === usbSony.id ||
+              b.productId === usbSamsung.id) &&
+            b.warehouseId === whOrigin.id &&
+            b.status === 'AVAILABLE'
+        )
+        .reduce((s, b) => s + b.quantity, 0);
+
+      const finPendingPickup = allFinBals
+        .filter(
+          (b) =>
+            (b.productId === usbHp.id ||
+              b.productId === usbSony.id ||
+              b.productId === usbSamsung.id) &&
+            b.status === 'FINISHED_PENDING_PICKUP' &&
+            b.productionOrderId === opRes.order.id
+        )
+        .reduce((s, b) => s + b.quantity, 0);
+
+      steps.push({
+        step: '8. Recogida parcial de 2,000 USB terminados (1,500 pendientes de recogida)',
+        passed: finAvailableOrigin === 2000 && finPendingPickup === 1500,
+        details: `Recogidos y disponibles en almacén destino: ${finAvailableOrigin} u. Pendientes de recogida en taller: ${finPendingPickup} u. Sin re-consumir UDP ni empaques.`,
+      });
+
+      // 9. Devolución de los 500 UDP 8 GB sobrantes al almacén origen
+      const retRes = await returnOrWasteOrderComponents({
+        idempotencyKey: `VERIFY-RET-UDP-500-${Date.now()}`,
+        userId,
+        productionOrderId: opRes.order.id,
+        operationType: 'RETURN_TO_ORIGIN',
+        quantity: 500,
+        reason: 'Devolución de 500 UDP 8 GB no utilizados al cerrar lote',
+        externalTx: tx,
+      });
+
+      const finalOriginUdpRows = await tx
+        .select()
+        .from(inventoryBalances)
+        .where(
+          and(
+            eq(inventoryBalances.productId, udp8gb.id),
+            eq(inventoryBalances.warehouseId, whOrigin.id),
+            eq(inventoryBalances.status, 'AVAILABLE')
+          )
+        );
+      const finalOriginUdp = finalOriginUdpRows[0]?.quantity ?? 0;
+
+      const finalCustodyRows = await tx
+        .select()
+        .from(inventoryBalances)
+        .where(
+          and(
+            eq(inventoryBalances.productId, udp8gb.id),
+            eq(inventoryBalances.productionOrderId, opRes.order.id),
+            eq(inventoryBalances.status, 'IN_PRODUCTION_CUSTODY')
+          )
+        );
+      const finalCustodyUdp = finalCustodyRows[0]?.quantity ?? 0;
+
+      steps.push({
+        step: '9. Devolución de 500 UDP 8 GB sobrantes al Almacén Principal',
+        passed:
+          finalOriginUdp === 16500 &&
+          finalCustodyUdp === 0 &&
+          retRes.order.returnedQty === 500,
+        details: `UDP 8 GB Disponible en Almacén Principal subió de 16,000 a ${finalOriginUdp} u. Saldo en custodia de la orden: ${finalCustodyUdp} u.`,
+      });
+
+      // 10. Auditoría matemática global del Ledger dentro de la transacción
+      const audit = await runAccountingInvariantAudit(tx);
+      steps.push({
+        step: '10. Conciliación algebraica de Kardex vs Saldos Materializados',
+        passed: audit.isHealthy,
+        details: `Saldos auditados: ${audit.checkedBalancesCount}, Líneas de Kardex: ${audit.checkedLedgerLinesCount}, Discrepancias: ${audit.balanceDiscrepancies.length + audit.orderDiscrepancies.length}.`,
+      });
+
+      const report = {
+        allPassed: steps.every((s) => s.passed),
+        steps,
+        rolledBackCleanly: true,
+        executedAt: new Date().toISOString(),
+      };
+
+      throw new RollbackVerificationSentinel(report);
+    });
+  } catch (err: any) {
+    if (err instanceof RollbackVerificationSentinel) {
+      return err.report;
+    }
+    throw err;
   }
 }

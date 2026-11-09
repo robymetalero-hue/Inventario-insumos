@@ -39,6 +39,7 @@ import {
 import {
   normalizeProductKey,
   registerGoodsReceipt,
+  withdrawInventoryStock,
   createProductionOrderWithReservation,
   dispatchProductionOrderComponents,
   acknowledgeProductionDispatch,
@@ -51,6 +52,7 @@ import {
   submitPhysicalCount,
   approvePhysicalCountAdjustment,
   runAccountingInvariantAudit,
+  runV2ScenarioVerification,
 } from './src/db/inventory-engine.ts';
 import {
   ensureBaseCatalogAndUsers,
@@ -316,8 +318,8 @@ async function startServer() {
         finishedGoodsDispatches: visibleFgDispatches,
         warehouseTransfers: visibleTransfers,
         physicalCounts: visibleCounts,
-        movementDocuments: visibleDocs.slice(0, 200),
-        movementLines: visibleLines.slice(0, 500),
+        movementDocuments: visibleDocs.slice(0, 500),
+        movementLines: visibleLines.slice(0, 1500),
         usersPublic: allUsersPublic,
         userWarehousePermissions: allWarehousePerms,
         serverTimestamp: new Date().toISOString(),
@@ -438,6 +440,11 @@ async function startServer() {
         name,
         family,
         productType,
+        brand,
+        model,
+        capacity,
+        color,
+        unitName,
         imageUrl,
         minStockAlert,
         initialQuantity,
@@ -473,21 +480,26 @@ async function startServer() {
           ? String(imageUrl)
           : makeDefaultProductPhoto(cleanSku, cleanName);
 
+      const cleanBrand = brand ? String(brand).trim() : String(family).trim();
+      const cleanModel = model ? String(model).trim() : 'Estándar';
+      const cleanCapacity = capacity ? String(capacity).trim() : 'N/A';
+      const cleanColor = color ? String(color).trim() : 'N/A';
+
       const [created] = await db
         .insert(products)
         .values({
           sku: cleanSku,
           name: cleanName,
-          normalizedKey: normalizeProductKey(family, cleanName, cleanSku, '', ''),
+          normalizedKey: normalizeProductKey(cleanBrand, cleanName, cleanCapacity, cleanColor, ''),
           description: cleanName,
           productType: resolvedType,
           family: String(family).trim(),
-          brand: String(family).trim(),
-          model: 'Estándar',
-          capacity: 'N/A',
-          color: 'N/A',
+          brand: cleanBrand,
+          model: cleanModel,
+          capacity: cleanCapacity,
+          color: cleanColor,
           material: 'N/A',
-          unitName: 'unidades',
+          unitName: unitName ? String(unitName).trim() : 'unidades',
           unitsPerBox: 1000,
           imageUrl: finalPhoto,
           barcode: '',
@@ -535,7 +547,19 @@ async function startServer() {
       }
 
       const prodId = Number(req.params.id);
-      const { sku, name, family, productType, imageUrl, minStockAlert } = req.body;
+      const {
+        sku,
+        name,
+        family,
+        productType,
+        brand,
+        model,
+        capacity,
+        color,
+        unitName,
+        imageUrl,
+        minStockAlert,
+      } = req.body;
 
       const existing = await db.select().from(products).where(eq(products.id, prodId));
       if (!existing[0]) {
@@ -554,6 +578,10 @@ async function startServer() {
       const cleanSku = sku ? String(sku).trim().toUpperCase() : existing[0].sku;
       const cleanName = name ? String(name).trim() : existing[0].name;
       const cleanFamily = family ? String(family).trim() : existing[0].family;
+      const cleanBrand = brand !== undefined ? String(brand).trim() : existing[0].brand;
+      const cleanModel = model !== undefined ? String(model).trim() : existing[0].model;
+      const cleanCapacity = capacity !== undefined ? String(capacity).trim() : existing[0].capacity;
+      const cleanColor = color !== undefined ? String(color).trim() : existing[0].color;
 
       const [updated] = await db
         .update(products)
@@ -562,7 +590,11 @@ async function startServer() {
           name: cleanName,
           description: cleanName,
           family: cleanFamily,
-          brand: cleanFamily,
+          brand: cleanBrand || cleanFamily,
+          model: cleanModel || 'Estándar',
+          capacity: cleanCapacity || 'N/A',
+          color: cleanColor || 'N/A',
+          unitName: unitName ? String(unitName).trim() : existing[0].unitName,
           productType: resolvedType,
           minStockAlert:
             minStockAlert !== undefined ? Number(minStockAlert) : existing[0].minStockAlert,
@@ -1002,7 +1034,7 @@ async function startServer() {
   });
 
   // =========================================================================
-  // 7. GOODS RECEIPT & STOCK OPERATIONS
+  // 7. GOODS RECEIPT (INGRESAR) & WITHDRAWAL (RETIRAR) OPERATIONS
   // =========================================================================
   app.post('/api/inventory/receipts', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -1013,6 +1045,7 @@ async function startServer() {
         warehouseId,
         locationId,
         supplierOrContainer,
+        reason,
         notes,
         lines,
       } = req.body;
@@ -1020,6 +1053,26 @@ async function startServer() {
       if (!assertWarehouseAccess(user, Number(warehouseId), 'RECEIVE')) {
         return res.status(403).json({
           error: 'No tiene permiso para registrar ingresos en el almacén seleccionado.',
+        });
+      }
+
+      const validTypes = [
+        'INGRESO_PROVEEDOR',
+        'DEVOLUCION_INSUMOS',
+        'REGULARIZACION_AUTORIZADA',
+        'APERTURA_INICIAL',
+      ];
+      const resolvedMovementType = validTypes.includes(movementType)
+        ? movementType
+        : 'INGRESO_PROVEEDOR';
+
+      if (
+        resolvedMovementType === 'REGULARIZACION_AUTORIZADA' &&
+        user.role !== 'OWNER' &&
+        user.role !== 'ADMIN'
+      ) {
+        return res.status(403).json({
+          error: 'Solo el Propietario o Administrador puede autorizar ingresos por regularización.',
         });
       }
 
@@ -1034,10 +1087,11 @@ async function startServer() {
       const result = await registerGoodsReceipt({
         idempotencyKey,
         userId: user.id,
-        movementType: movementType === 'APERTURA_INICIAL' ? 'APERTURA_INICIAL' : 'INGRESO_PROVEEDOR',
+        movementType: resolvedMovementType,
         warehouseId: Number(warehouseId),
         locationId: Number(locationId),
         supplierOrContainer: supplierOrContainer || '',
+        reason: reason || '',
         notes: notes || '',
         lines: sanitizedLines,
       });
@@ -1048,8 +1102,95 @@ async function startServer() {
     }
   });
 
+  app.post('/api/inventory/withdrawals', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const user = req.authUser!;
+      const {
+        idempotencyKey,
+        warehouseId,
+        locationId,
+        productId,
+        quantity,
+        withdrawalMode,
+        productionOrderId,
+        toWarehouseId,
+        toLocationId,
+        recipientOrTarget,
+        reason,
+        notes,
+      } = req.body;
+
+      const whIdNum = Number(warehouseId);
+      const canOperateWh =
+        assertWarehouseAccess(user, whIdNum, 'DISPATCH') ||
+        assertWarehouseAccess(user, whIdNum, 'PRODUCE');
+
+      if (!canOperateWh) {
+        return res.status(403).json({
+          error: 'No tiene permiso para retirar productos o insumos de este almacén.',
+        });
+      }
+
+      // If withdrawalMode is TRANSFERENCIA_ALMACEN, route to audited transfer engine
+      if (withdrawalMode === 'TRANSFERENCIA_ALMACEN') {
+        if (!toWarehouseId || !toLocationId) {
+          return res.status(400).json({
+            error: 'Seleccione el almacén y ubicación destino para la transferencia.',
+          });
+        }
+        const trResult = await createOrMoveWarehouseTransfer({
+          idempotencyKey,
+          userId: user.id,
+          fromWarehouseId: whIdNum,
+          fromLocationId: Number(locationId),
+          toWarehouseId: Number(toWarehouseId),
+          toLocationId: Number(toLocationId),
+          productId: Number(productId),
+          quantity: Number(quantity),
+          notes: reason || notes || 'Transferencia desde botón Retirar',
+        });
+        return res.json(trResult);
+      }
+
+      if (
+        (withdrawalMode === 'CONSUMO_OPERATIVO' || withdrawalMode === 'MERMA_DANO') &&
+        user.role !== 'OWNER' &&
+        user.role !== 'ADMIN' &&
+        user.role !== 'WAREHOUSE_MANAGER'
+      ) {
+        return res.status(403).json({
+          error:
+            'Los retiros por consumo operativo o merma requieren autorización de Administrador o Encargado de Almacén.',
+        });
+      }
+
+      const result = await withdrawInventoryStock({
+        idempotencyKey,
+        userId: user.id,
+        warehouseId: whIdNum,
+        locationId: Number(locationId),
+        productId: Number(productId),
+        quantity: Number(quantity),
+        withdrawalMode:
+          withdrawalMode === 'CONSUMO_OPERATIVO'
+            ? 'CONSUMO_OPERATIVO'
+            : withdrawalMode === 'MERMA_DANO'
+            ? 'MERMA_DANO'
+            : 'ORDEN_PRODUCCION',
+        productionOrderId: productionOrderId ? Number(productionOrderId) : undefined,
+        recipientOrTarget: recipientOrTarget || '',
+        reason: reason || '',
+        notes: notes || '',
+      });
+
+      return res.json(result);
+    } catch (error: any) {
+      return res.status(400).json({ error: error.message });
+    }
+  });
+
   // =========================================================================
-  // 8. PRODUCTION ORDERS, DISPATCHES, ACKNOWLEDGEMENTS & BATCHES
+  // 8. PRODUCTION ORDERS, DISPATCHES, ACKNOWLEDGEMENTS & BATCHES (RECIPE-FREE)
   // =========================================================================
   app.post('/api/production/orders', requireAuth, async (req: AuthRequest, res) => {
     try {
@@ -1070,11 +1211,10 @@ async function startServer() {
         assignedUserId: Number(req.body.assignedUserId || user.id),
         strategicProductId: Number(req.body.strategicProductId),
         authorizedQty: Number(req.body.authorizedQty),
-        allowedRecipeIds: Array.isArray(req.body.allowedRecipeIds)
-          ? req.body.allowedRecipeIds.map(Number)
-          : [],
+        allowedRecipeIds: [],
         priority: req.body.priority || 'NORMAL',
         instructions: req.body.instructions || '',
+        autoDispatch: req.body.autoDispatch !== false,
       });
 
       return res.json(result);
@@ -1123,8 +1263,15 @@ async function startServer() {
         userId: user.id,
         productionOrderId: Number(req.body.productionOrderId),
         items: (req.body.items || []).map((i: any) => ({
-          recipeId: Number(i.recipeId),
-          quantityToProduce: Number(i.quantityToProduce),
+          finishedProductId: Number(i.finishedProductId),
+          quantityProduced: Number(i.quantityProduced ?? i.quantityToProduce),
+          strategicQtyConsumed:
+            i.strategicQtyConsumed !== undefined
+              ? Number(i.strategicQtyConsumed)
+              : Number(i.quantityProduced ?? i.quantityToProduce),
+          usedWithdrawalFolios: Array.isArray(i.usedWithdrawalFolios)
+            ? i.usedWithdrawalFolios
+            : [],
           notes: i.notes || '',
         })),
       });
@@ -1165,6 +1312,7 @@ async function startServer() {
         toWarehouseId: Number(req.body.toWarehouseId),
         toLocationId: Number(req.body.toLocationId),
         dispatchQty: Number(req.body.dispatchQty),
+        autoReceive: Boolean(req.body.autoReceive),
         notes: req.body.notes,
       });
       return res.json(result);
@@ -1377,6 +1525,16 @@ async function startServer() {
       return res.json({ reset: true });
     } catch (error: any) {
       return res.status(500).json({ error: 'No se pudo reiniciar el inventario.' });
+    }
+  });
+
+  app.post('/api/admin/verify-v2-scenarios', requireAuth, requireOwnerPrivateAccess, async (req: AuthRequest, res) => {
+    try {
+      const report = await runV2ScenarioVerification(req.authUser!.id);
+      return res.json(report);
+    } catch (error: any) {
+      console.error('Verification error:', error);
+      return res.status(500).json({ error: error.message || 'Error en la verificación aislada.' });
     }
   });
 

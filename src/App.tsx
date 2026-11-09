@@ -13,7 +13,6 @@ import {
   AlertCircle,
   RefreshCw,
   Tags,
-  Layers,
   Building2,
   Users,
   Menu,
@@ -21,6 +20,7 @@ import {
   ShieldCheck,
   Sparkles,
   ChevronRight,
+  LayoutDashboard,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, WorkspaceData, translateRole } from './types.ts';
@@ -30,14 +30,14 @@ import { OperationsAuditAndPrivateView } from './components/OperationsAuditAndPr
 import { PWAInstallButton } from './components/PWAInstallButton.tsx';
 
 type ActiveModule =
+  | 'SUMMARY'
   | 'STOCK_CATALOG'
-  | 'CATEGORIES'
-  | 'WAREHOUSES_LOCATIONS'
   | 'PRODUCTION_ORDERS'
-  | 'BOM_RECIPES'
   | 'PICKUPS_DELIVERIES'
-  | 'TRANSFERS_COUNTS'
   | 'KARDEX_REPORTS'
+  | 'WAREHOUSES_LOCATIONS'
+  | 'CATEGORIES'
+  | 'TRANSFERS_COUNTS'
   | 'USERS_MANAGEMENT'
   | 'OWNER_PRIVATE';
 
@@ -65,7 +65,9 @@ export default function App() {
 
   const [activeModule, setActiveModule] = useState<ActiveModule>(() => {
     try {
-      return (localStorage.getItem(STORAGE_MODULE_KEY) as ActiveModule) || 'STOCK_CATALOG';
+      const saved = localStorage.getItem(STORAGE_MODULE_KEY) as string;
+      if (saved === 'BOM_RECIPES') return 'PRODUCTION_ORDERS';
+      return (saved as ActiveModule) || 'STOCK_CATALOG';
     } catch {
       return 'STOCK_CATALOG';
     }
@@ -75,6 +77,11 @@ export default function App() {
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [loading, setLoading] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
+
+  // Cross-module context state
+  const [preselectedWithdrawOrderId, setPreselectedWithdrawOrderId] = useState<number | null>(null);
+  const [kardexFilterProductId, setKardexFilterProductId] = useState<number | null>(null);
+  const [kardexFilterOrderId, setKardexFilterOrderId] = useState<number | null>(null);
 
   // Login form state (defaults to admin / 1234 for fast entry)
   const [username, setUsername] = useState('admin');
@@ -317,70 +324,69 @@ export default function App() {
     roles?: string[];
   }[] = [
     {
+      id: 'SUMMARY',
+      label: 'Resumen General',
+      icon: LayoutDashboard,
+      group: 'OPERACIÓN PRINCIPAL',
+    },
+    {
       id: 'STOCK_CATALOG',
       label: 'Inventario y Productos',
       icon: Package,
-      group: 'INVENTARIO',
+      group: 'OPERACIÓN PRINCIPAL',
       badge: data?.products.length,
+    },
+    {
+      id: 'PRODUCTION_ORDERS',
+      label: 'Órdenes de Producción',
+      icon: Factory,
+      group: 'OPERACIÓN PRINCIPAL',
+      badge: data?.productionOrders.length,
+    },
+    {
+      id: 'PICKUPS_DELIVERIES',
+      label: 'Productos Terminados / Recogidas',
+      icon: Truck,
+      group: 'OPERACIÓN PRINCIPAL',
+    },
+    {
+      id: 'KARDEX_REPORTS',
+      label: 'Historial y Kardex',
+      icon: History,
+      group: 'TRAZABILIDAD Y ALMACENES',
+    },
+    {
+      id: 'WAREHOUSES_LOCATIONS',
+      label: 'Almacenes y Ubicaciones',
+      icon: Building2,
+      group: 'TRAZABILIDAD Y ALMACENES',
+      badge: data?.warehouses.length,
     },
     {
       id: 'CATEGORIES',
       label: 'Clasificaciones (Dptos.)',
       icon: Tags,
-      group: 'INVENTARIO',
+      group: 'TRAZABILIDAD Y ALMACENES',
       badge: data?.categories.length,
-    },
-    {
-      id: 'WAREHOUSES_LOCATIONS',
-      label: 'Almacenes y Estantes',
-      icon: Building2,
-      group: 'INVENTARIO',
-      badge: data?.warehouses.length,
-    },
-    {
-      id: 'PRODUCTION_ORDERS',
-      label: 'Producción y Órdenes',
-      icon: Factory,
-      group: 'PRODUCCIÓN Y SALIDAS',
-      badge: data?.productionOrders.length,
-    },
-    {
-      id: 'BOM_RECIPES',
-      label: 'Recetas de Ensamblaje',
-      icon: Layers,
-      group: 'PRODUCCIÓN Y SALIDAS',
-      badge: data?.recipes.length,
-    },
-    {
-      id: 'PICKUPS_DELIVERIES',
-      label: 'Recogida de Terminados',
-      icon: Truck,
-      group: 'PRODUCCIÓN Y SALIDAS',
     },
     {
       id: 'TRANSFERS_COUNTS',
       label: 'Traslados y Conteos',
       icon: ArrowLeftRight,
-      group: 'CONTROL Y ADMINISTRACIÓN',
-    },
-    {
-      id: 'KARDEX_REPORTS',
-      label: 'Historial (Kardex)',
-      icon: History,
-      group: 'CONTROL Y ADMINISTRACIÓN',
+      group: 'TRAZABILIDAD Y ALMACENES',
     },
     {
       id: 'USERS_MANAGEMENT',
-      label: 'Usuarios y Accesos',
+      label: 'Usuarios y Permisos',
       icon: Users,
-      group: 'CONTROL Y ADMINISTRACIÓN',
+      group: 'ADMINISTRACIÓN',
       roles: ['OWNER', 'ADMIN'],
     },
     {
       id: 'OWNER_PRIVATE',
       label: 'Costos Privados (Owner)',
       icon: Lock,
-      group: 'CONTROL Y ADMINISTRACIÓN',
+      group: 'ADMINISTRACIÓN',
       roles: ['OWNER'],
     },
   ];
@@ -594,37 +600,54 @@ export default function App() {
               exit={{ opacity: 0, y: -8 }}
               transition={{ duration: 0.18, ease: 'easeOut' }}
             >
-              {(activeModule === 'STOCK_CATALOG' ||
+              {(activeModule === 'SUMMARY' ||
+                activeModule === 'STOCK_CATALOG' ||
                 activeModule === 'CATEGORIES' ||
                 activeModule === 'WAREHOUSES_LOCATIONS') && (
                 <CatalogAndStockView
                   data={data}
                   isOnline={isOnline}
                   initialSubView={
-                    activeModule === 'STOCK_CATALOG'
+                    activeModule === 'SUMMARY'
+                      ? 'SUMMARY'
+                      : activeModule === 'STOCK_CATALOG'
                       ? 'PRODUCTS'
                       : activeModule === 'CATEGORIES'
                       ? 'CATEGORIES'
                       : 'WAREHOUSES'
                   }
+                  preselectedWithdrawOrderId={preselectedWithdrawOrderId}
+                  onClearPreselectedOrder={() => setPreselectedWithdrawOrderId(null)}
+                  onNavigateToModule={(mod, options) => {
+                    if (options?.productId) {
+                      setKardexFilterProductId(options.productId);
+                    }
+                    if (options?.orderId) {
+                      setKardexFilterOrderId(options.orderId);
+                    }
+                    handleSelectModule(mod);
+                  }}
                   apiFetch={apiFetch}
                   onRefresh={() => fetchWorkspace()}
                 />
               )}
 
               {(activeModule === 'PRODUCTION_ORDERS' ||
-                activeModule === 'BOM_RECIPES' ||
                 activeModule === 'PICKUPS_DELIVERIES') && (
                 <ProductionAndPickupView
                   data={data}
                   isOnline={isOnline}
                   initialSubView={
-                    activeModule === 'PRODUCTION_ORDERS'
-                      ? 'ORDENES'
-                      : activeModule === 'BOM_RECIPES'
-                      ? 'RECETAS'
-                      : 'RECOGIDA'
+                    activeModule === 'PRODUCTION_ORDERS' ? 'ORDENES' : 'RECOGIDA'
                   }
+                  onRequestWithdrawForOrder={(orderId: number) => {
+                    setPreselectedWithdrawOrderId(orderId);
+                    handleSelectModule('STOCK_CATALOG');
+                  }}
+                  onNavigateToKardexForOrder={(orderId: number) => {
+                    setKardexFilterOrderId(orderId);
+                    handleSelectModule('KARDEX_REPORTS');
+                  }}
                   apiFetch={apiFetch}
                   onRefresh={() => fetchWorkspace()}
                 />
@@ -646,6 +669,12 @@ export default function App() {
                       ? 'USERS'
                       : 'PRIVATE_OWNER'
                   }
+                  initialKardexProductId={kardexFilterProductId}
+                  initialKardexOrderId={kardexFilterOrderId}
+                  onClearKardexContext={() => {
+                    setKardexFilterProductId(null);
+                    setKardexFilterOrderId(null);
+                  }}
                   apiFetch={apiFetch}
                   onRefresh={() => fetchWorkspace()}
                 />

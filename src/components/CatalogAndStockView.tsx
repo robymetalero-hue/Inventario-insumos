@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Package,
   Search,
@@ -8,7 +8,9 @@ import {
   Camera,
   FolderKanban,
   ArrowDownToLine,
+  ArrowUpFromLine,
   Eye,
+  History,
   X,
   Check,
   Warehouse as WarehouseIcon,
@@ -22,6 +24,11 @@ import {
   PackageCheck,
   Building2,
   TrendingUp,
+  Factory,
+  FileCheck2,
+  LayoutGrid,
+  List,
+  ArrowRight,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
@@ -29,7 +36,9 @@ import {
   Product,
   ProductCategory,
   Warehouse,
+  MovementVoucherData,
   formatInt,
+  formatBoliviaDateTime,
   translateStatus,
   translateAccountingType,
 } from '../types.ts';
@@ -48,7 +57,19 @@ function getDepartmentIcon(name: string, accountingType?: string) {
 interface Props {
   data: WorkspaceData;
   isOnline: boolean;
-  initialSubView?: 'PRODUCTS' | 'CATEGORIES' | 'RECEIPTS' | 'WAREHOUSES';
+  initialSubView?: 'SUMMARY' | 'PRODUCTS' | 'CATEGORIES' | 'WAREHOUSES';
+  preselectedWithdrawOrderId?: number | null;
+  onClearPreselectedOrder?: () => void;
+  onNavigateToModule?: (
+    module:
+      | 'SUMMARY'
+      | 'STOCK_CATALOG'
+      | 'PRODUCTION_ORDERS'
+      | 'PICKUPS_DELIVERIES'
+      | 'KARDEX_REPORTS'
+      | 'WAREHOUSES_LOCATIONS',
+    options?: { productId?: number; orderId?: number }
+  ) => void;
   apiFetch: (url: string, options?: RequestInit) => Promise<any>;
   onRefresh: () => Promise<void>;
 }
@@ -57,52 +78,90 @@ export function CatalogAndStockView({
   data,
   isOnline,
   initialSubView = 'PRODUCTS',
+  preselectedWithdrawOrderId,
+  onClearPreselectedOrder,
+  onNavigateToModule,
   apiFetch,
   onRefresh,
 }: Props) {
-  const [subView, setSubView] = useState<'PRODUCTS' | 'CATEGORIES' | 'RECEIPTS' | 'WAREHOUSES'>(
+  const [subView, setSubView] = useState<'SUMMARY' | 'PRODUCTS' | 'CATEGORIES' | 'WAREHOUSES'>(
     initialSubView
   );
-  React.useEffect(() => {
+
+  useEffect(() => {
     setSubView(initialSubView);
   }, [initialSubView]);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<number | 'ALL'>('ALL');
-  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [selectedCapacity, setSelectedCapacity] = useState<string>('ALL');
+  const [viewMode, setViewMode] = useState<'CARDS' | 'TABLE'>('CARDS');
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(
+    null
+  );
   const [submitting, setSubmitting] = useState(false);
 
+  // Voucher Receipt Modal State
+  const [voucherData, setVoucherData] = useState<MovementVoucherData | null>(null);
+
+  // Product Detail Modal State
+  const [detailProduct, setDetailProduct] = useState<Product | null>(null);
+
   // =========================================================================
-  // 1. SIMPLIFIED PRODUCT MODAL STATE (Create & Edit)
-  // Only asks for: SKU, Descripción, Clasificación, Cantidad (optional on create), Fotografía
+  // 1. PRODUCT CATALOG MODAL STATE (Create & Edit)
   // =========================================================================
   const [productModalOpen, setProductModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [prodSku, setProdSku] = useState('');
   const [prodDescription, setProdDescription] = useState('');
-  const [prodCategoryName, setProdCategoryName] = useState(
-    data.categories[0]?.name || 'Cases'
-  );
+  const [prodCategoryName, setProdCategoryName] = useState(data.categories[0]?.name || 'Empaques');
+  const [prodBrand, setProdBrand] = useState('');
+  const [prodModel, setProdModel] = useState('');
+  const [prodCapacity, setProdCapacity] = useState('N/A');
   const [prodInitialQty, setProdInitialQty] = useState<number>(0);
-  const [prodInitialWhId, setProdInitialWhId] = useState<number>(
-    data.warehouses[0]?.id || 0
-  );
+  const [prodInitialWhId, setProdInitialWhId] = useState<number>(data.warehouses[0]?.id || 0);
   const [prodImageUrl, setProdImageUrl] = useState('');
   const [deleteConfirmProduct, setDeleteConfirmProduct] = useState<Product | null>(null);
   const [zoomPhotoProduct, setZoomPhotoProduct] = useState<Product | null>(null);
 
-  // Quick Add Stock Modal for an existing product
-  const [quickStockProduct, setQuickStockProduct] = useState<Product | null>(null);
-  const [quickStockQty, setQuickStockQty] = useState<number>(500);
-  const [quickStockWhId, setQuickStockWhId] = useState<number>(data.warehouses[0]?.id || 0);
-  const [quickStockSupplier, setQuickStockSupplier] = useState('');
-  const [quickIncludeCost, setQuickIncludeCost] = useState(false);
-  const [quickFobCost, setQuickFobCost] = useState<number>(0);
-  const [quickFreightCost, setQuickFreightCost] = useState<number>(0);
-  const [quickCustomsCost, setQuickCustomsCost] = useState<number>(0);
+  // =========================================================================
+  // 2. MODAL "INGRESAR" STOCK STATE
+  // =========================================================================
+  const [ingresoProduct, setIngresoProduct] = useState<Product | null>(null);
+  const [ingresoWhId, setIngresoWhId] = useState<number>(data.warehouses[0]?.id || 0);
+  const [ingresoLocId, setIngresoLocId] = useState<number>(0);
+  const [ingresoQty, setIngresoQty] = useState<number>(1000);
+  const [ingresoMovementType, setIngresoMovementType] = useState<
+    'INGRESO_PROVEEDOR' | 'DEVOLUCION_INSUMOS' | 'REGULARIZACION_AUTORIZADA'
+  >('INGRESO_PROVEEDOR');
+  const [ingresoSupplier, setIngresoSupplier] = useState('');
+  const [ingresoNotes, setIngresoNotes] = useState('');
+  const [ingresoIncludeCost, setIngresoIncludeCost] = useState(false);
+  const [ingresoFobCost, setIngresoFobCost] = useState<number>(0);
+  const [ingresoFreightCost, setIngresoFreightCost] = useState<number>(0);
+  const [ingresoCustomsCost, setIngresoCustomsCost] = useState<number>(0);
 
   // =========================================================================
-  // 2. CLASSIFICATIONS / DEPARTMENTS CRUD STATE (Empaques, Cases, etc.)
+  // 3. MODAL "RETIRAR" STOCK STATE
+  // =========================================================================
+  const [retiroProduct, setRetiroProduct] = useState<Product | null>(null);
+  const [retiroWhId, setRetiroWhId] = useState<number>(data.warehouses[0]?.id || 0);
+  const [retiroLocId, setRetiroLocId] = useState<number>(0);
+  const [retiroQty, setRetiroQty] = useState<number>(500);
+  const [retiroMode, setRetiroMode] = useState<
+    'ORDEN_PRODUCCION' | 'CONSUMO_OPERATIVO' | 'TRANSFERENCIA_ALMACEN' | 'MERMA_DANO'
+  >('ORDEN_PRODUCCION');
+  const [retiroOrderId, setRetiroOrderId] = useState<number>(0);
+  const [retiroTargetUse, setRetiroTargetUse] = useState('');
+  const [retiroReason, setRetiroReason] = useState('');
+  const [retiroNotes, setRetiroNotes] = useState('');
+  const [retiroDestWhId, setRetiroDestWhId] = useState<number>(
+    data.allWarehousesSummary[1]?.id || data.warehouses[0]?.id || 0
+  );
+
+  // =========================================================================
+  // 4. CLASSIFICATIONS / DEPARTMENTS CRUD STATE
   // =========================================================================
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<ProductCategory | null>(null);
@@ -113,7 +172,7 @@ export function CatalogAndStockView({
   const [catDescription, setCatDescription] = useState('');
 
   // =========================================================================
-  // 3. WAREHOUSES & LOCATIONS CRUD STATE + IPHONE SLIDE-TO-DELETE
+  // 5. WAREHOUSES & LOCATIONS CRUD STATE + IPHONE SLIDE-TO-DELETE
   // =========================================================================
   const [whName, setWhName] = useState('');
   const [whAddress, setWhAddress] = useState('');
@@ -122,23 +181,95 @@ export function CatalogAndStockView({
   const [locZone, setLocZone] = useState('');
   const [locShelf, setLocShelf] = useState('');
 
-  // Slide-to-delete warehouse confirmation state
   const [warehouseToDelete, setWarehouseToDelete] = useState<Warehouse | null>(null);
   const [slideProgress, setSlideProgress] = useState<number>(0);
   const [deletingWarehouse, setDeletingWarehouse] = useState<boolean>(false);
 
   const isAdmin = data.user.role === 'OWNER' || data.user.role === 'ADMIN';
+  const canAuthorizeSpecialWithdrawal =
+    data.user.role === 'OWNER' ||
+    data.user.role === 'ADMIN' ||
+    data.user.role === 'WAREHOUSE_MANAGER';
   const canViewCosts = data.user.role === 'OWNER' || data.user.canViewPrivateCosts;
 
-  React.useEffect(() => {
-    setSubView(initialSubView);
-  }, [initialSubView]);
+  const openOrders = data.productionOrders.filter(
+    (o) => o.status !== 'CLOSED' && o.status !== 'CANCELLED'
+  );
+
+  // Open Ingresar Modal helper
+  const openIngresarModal = (prod: Product) => {
+    const whId =
+      selectedWarehouseId !== 'ALL' ? selectedWarehouseId : data.warehouses[0]?.id || 0;
+    const defaultLoc =
+      data.locations.find((l) => l.warehouseId === whId) || data.locations[0];
+    setIngresoProduct(prod);
+    setIngresoWhId(whId);
+    setIngresoLocId(defaultLoc?.id || 0);
+    setIngresoQty(1000);
+    setIngresoMovementType('INGRESO_PROVEEDOR');
+    setIngresoSupplier('');
+    setIngresoNotes('');
+    setIngresoIncludeCost(false);
+  };
+
+  // Open Retirar Modal helper
+  const openRetirarModal = (prod: Product, forcedOrderId?: number) => {
+    // Pick the warehouse where this product currently has the highest AVAILABLE stock
+    const prodAvailBalances = data.balances.filter(
+      (b) => b.productId === prod.id && b.status === 'AVAILABLE' && b.quantity > 0
+    );
+    const bestBalance = prodAvailBalances.sort((a, b) => b.quantity - a.quantity)[0];
+    const whId =
+      selectedWarehouseId !== 'ALL'
+        ? selectedWarehouseId
+        : bestBalance?.warehouseId || data.warehouses[0]?.id || 0;
+    const locId =
+      bestBalance && bestBalance.warehouseId === whId
+        ? bestBalance.locationId
+        : data.locations.find((l) => l.warehouseId === whId)?.id ||
+          data.locations[0]?.id ||
+          0;
+
+    const currentAvail =
+      data.balances
+        .filter(
+          (b) =>
+            b.productId === prod.id &&
+            b.warehouseId === whId &&
+            b.locationId === locId &&
+            b.status === 'AVAILABLE'
+        )
+        .reduce((s, b) => s + b.quantity, 0) || 0;
+
+    setRetiroProduct(prod);
+    setRetiroWhId(whId);
+    setRetiroLocId(locId);
+    setRetiroQty(currentAvail > 0 ? Math.min(500, currentAvail) : 100);
+
+    const activeOrderId = forcedOrderId || preselectedWithdrawOrderId || openOrders[0]?.id || 0;
+    if (activeOrderId > 0) {
+      setRetiroMode('ORDEN_PRODUCCION');
+      setRetiroOrderId(activeOrderId);
+    } else if (canAuthorizeSpecialWithdrawal) {
+      setRetiroMode('CONSUMO_OPERATIVO');
+      setRetiroOrderId(0);
+    } else {
+      setRetiroMode('ORDEN_PRODUCCION');
+      setRetiroOrderId(0);
+    }
+    setRetiroTargetUse('');
+    setRetiroReason('');
+    setRetiroNotes('');
+  };
 
   const openCreateProductModal = () => {
     setEditingProduct(null);
     setProdSku('');
     setProdDescription('');
     setProdCategoryName(data.categories[0]?.name || 'Empaques');
+    setProdBrand('');
+    setProdModel('');
+    setProdCapacity('N/A');
     setProdInitialQty(0);
     setProdInitialWhId(data.warehouses[0]?.id || 0);
     setProdImageUrl('');
@@ -150,6 +281,9 @@ export function CatalogAndStockView({
     setProdSku(prod.sku);
     setProdDescription(prod.name);
     setProdCategoryName(prod.family);
+    setProdBrand(prod.brand || '');
+    setProdModel(prod.model || '');
+    setProdCapacity(prod.capacity || 'N/A');
     setProdInitialQty(0);
     setProdImageUrl(prod.imageUrl);
     setProductModalOpen(true);
@@ -195,6 +329,9 @@ export function CatalogAndStockView({
             sku: prodSku,
             name: prodDescription,
             family: prodCategoryName,
+            brand: prodBrand || prodCategoryName,
+            model: prodModel || 'Estándar',
+            capacity: prodCapacity || 'N/A',
             productType: accountingType,
             imageUrl: prodImageUrl,
           }),
@@ -211,6 +348,9 @@ export function CatalogAndStockView({
             sku: prodSku,
             name: prodDescription,
             family: prodCategoryName,
+            brand: prodBrand || prodCategoryName,
+            model: prodModel || 'Estándar',
+            capacity: prodCapacity || 'N/A',
             productType: accountingType,
             imageUrl: prodImageUrl,
             initialQuantity: prodInitialQty,
@@ -260,11 +400,25 @@ export function CatalogAndStockView({
     }
   };
 
-  const handleConfirmQuickStock = async (e: React.FormEvent) => {
+  // =========================================================================
+  // HANDLER: CONFIRMAR INGRESO DE STOCK
+  // =========================================================================
+  const handleConfirmIngreso = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isOnline || !quickStockProduct || quickStockQty <= 0) return;
+    if (!isOnline || !ingresoProduct) return;
+    if (!Number.isInteger(ingresoQty) || ingresoQty <= 0) {
+      setFeedback({
+        type: 'error',
+        text: 'La cantidad a ingresar debe ser un número entero positivo mayor a cero.',
+      });
+      return;
+    }
+
     const loc =
-      data.locations.find((l) => l.warehouseId === quickStockWhId) || data.locations[0];
+      data.locations.find((l) => l.id === ingresoLocId && l.warehouseId === ingresoWhId) ||
+      data.locations.find((l) => l.warehouseId === ingresoWhId) ||
+      data.locations[0];
+
     if (!loc) {
       setFeedback({ type: 'error', text: 'Seleccione un almacén con ubicación activa.' });
       return;
@@ -273,25 +427,33 @@ export function CatalogAndStockView({
     setSubmitting(true);
     setFeedback(null);
     try {
+      const reasonLabel =
+        ingresoMovementType === 'DEVOLUCION_INSUMOS'
+          ? 'Devolución de insumos no utilizados'
+          : ingresoMovementType === 'REGULARIZACION_AUTORIZADA'
+          ? 'Regularización autorizada'
+          : 'Recepción de mercancía';
+
       const res = await apiFetch('/api/inventory/receipts', {
         method: 'POST',
         body: JSON.stringify({
-          idempotencyKey: `ING-QUICK-${quickStockProduct.id}-${Date.now()}`,
-          movementType: 'INGRESO_PROVEEDOR',
-          warehouseId: quickStockWhId,
+          idempotencyKey: `ING-${ingresoProduct.id}-${Date.now()}`,
+          movementType: ingresoMovementType,
+          warehouseId: ingresoWhId,
           locationId: loc.id,
-          supplierOrContainer: quickStockSupplier || 'Ingreso Directo a Almacén',
-          notes: `Ingreso de ${quickStockProduct.name}`,
+          supplierOrContainer: ingresoSupplier || reasonLabel,
+          reason: reasonLabel,
+          notes: ingresoNotes || `Ingreso de ${ingresoProduct.name}`,
           lines: [
             {
-              productId: quickStockProduct.id,
-              quantity: quickStockQty,
+              productId: ingresoProduct.id,
+              quantity: ingresoQty,
               privateCost:
-                canViewCosts && quickIncludeCost
+                canViewCosts && ingresoIncludeCost
                   ? {
-                      fobTotalCost: quickFobCost,
-                      freightCost: quickFreightCost,
-                      customsPolicyCost: quickCustomsCost,
+                      fobTotalCost: ingresoFobCost,
+                      freightCost: ingresoFreightCost,
+                      customsPolicyCost: ingresoCustomsCost,
                       otherImportExpenses: 0,
                       currency: 'USD',
                     }
@@ -300,15 +462,136 @@ export function CatalogAndStockView({
           ],
         }),
       });
-      setQuickStockProduct(null);
-      setQuickStockSupplier('');
-      setQuickIncludeCost(false);
-      setFeedback({
-        type: 'success',
-        text: `Se sumaron +${formatInt(quickStockQty)} unidades a "${
-          quickStockProduct.name
-        }" (Comprobante ${res.folio}).`,
+
+      const whNameStr =
+        data.warehouses.find((w) => w.id === ingresoWhId)?.name || 'Almacén';
+
+      setVoucherData({
+        folio: res.folio,
+        operationTitle: 'Comprobante de Ingreso de Inventario',
+        operationType: 'INGRESO',
+        serverTimestamp: res.serverTimestamp || new Date().toISOString(),
+        userFullName: data.user.fullName,
+        productSku: ingresoProduct.sku,
+        productName: ingresoProduct.name,
+        productImageUrl: ingresoProduct.imageUrl,
+        warehouseName: whNameStr,
+        locationName: `${loc.zoneName} · ${loc.shelfName}`,
+        reason: `${reasonLabel}${ingresoSupplier ? ` (${ingresoSupplier})` : ''}`,
+        notes: ingresoNotes,
+        stockBefore: res.stockBefore ?? 0,
+        quantityChanged: ingresoQty,
+        stockAfter: res.stockAfter ?? ingresoQty,
       });
+
+      setIngresoProduct(null);
+      await onRefresh();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // =========================================================================
+  // HANDLER: CONFIRMAR RETIRO DE STOCK
+  // =========================================================================
+  const handleConfirmRetiro = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isOnline || !retiroProduct) return;
+    if (!Number.isInteger(retiroQty) || retiroQty <= 0) {
+      setFeedback({
+        type: 'error',
+        text: 'La cantidad a retirar debe ser un número entero positivo mayor a cero.',
+      });
+      return;
+    }
+
+    const loc =
+      data.locations.find((l) => l.id === retiroLocId && l.warehouseId === retiroWhId) ||
+      data.locations.find((l) => l.warehouseId === retiroWhId) ||
+      data.locations[0];
+
+    if (!loc) {
+      setFeedback({ type: 'error', text: 'Seleccione un almacén con ubicación válida.' });
+      return;
+    }
+
+    if (retiroMode === 'ORDEN_PRODUCCION' && !retiroOrderId) {
+      setFeedback({
+        type: 'error',
+        text: 'Debe seleccionar una Orden de Producción activa para vincular este retiro de insumos.',
+      });
+      return;
+    }
+
+    const destLoc =
+      data.allLocationsSummary.find((l) => l.warehouseId === retiroDestWhId) || loc;
+
+    setSubmitting(true);
+    setFeedback(null);
+    try {
+      const selectedOrder = data.productionOrders.find((o) => o.id === retiroOrderId);
+      const res = await apiFetch('/api/inventory/withdrawals', {
+        method: 'POST',
+        body: JSON.stringify({
+          idempotencyKey: `RET-${retiroProduct.id}-${Date.now()}`,
+          warehouseId: retiroWhId,
+          locationId: loc.id,
+          productId: retiroProduct.id,
+          quantity: retiroQty,
+          withdrawalMode: retiroMode,
+          productionOrderId: retiroMode === 'ORDEN_PRODUCCION' ? retiroOrderId : undefined,
+          toWarehouseId: retiroMode === 'TRANSFERENCIA_ALMACEN' ? retiroDestWhId : undefined,
+          toLocationId: retiroMode === 'TRANSFERENCIA_ALMACEN' ? destLoc.id : undefined,
+          recipientOrTarget:
+            retiroTargetUse ||
+            (selectedOrder ? `Orden ${selectedOrder.orderNumber}` : 'Uso Autorizado'),
+          reason:
+            retiroReason ||
+            (retiroMode === 'ORDEN_PRODUCCION'
+              ? `Insumo retirado para Orden ${selectedOrder?.orderNumber || ''}`
+              : retiroMode === 'TRANSFERENCIA_ALMACEN'
+              ? 'Transferencia a otro almacén'
+              : 'Retiro autorizado de inventario'),
+          notes: retiroNotes,
+        }),
+      });
+
+      const whNameStr =
+        data.warehouses.find((w) => w.id === retiroWhId)?.name || 'Almacén';
+
+      setVoucherData({
+        folio: res.folio,
+        operationTitle:
+          retiroMode === 'ORDEN_PRODUCCION'
+            ? 'Comprobante de Retiro de Insumos para Producción'
+            : retiroMode === 'TRANSFERENCIA_ALMACEN'
+            ? 'Comprobante de Salida por Transferencia'
+            : 'Comprobante de Retiro de Inventario',
+        operationType: retiroMode === 'TRANSFERENCIA_ALMACEN' ? 'TRANSFERENCIA' : 'RETIRO',
+        serverTimestamp: res.serverTimestamp || new Date().toISOString(),
+        userFullName: data.user.fullName,
+        productSku: retiroProduct.sku,
+        productName: retiroProduct.name,
+        productImageUrl: retiroProduct.imageUrl,
+        warehouseName: whNameStr,
+        locationName: `${loc.zoneName} · ${loc.shelfName}`,
+        orderNumber: selectedOrder?.orderNumber || res.orderNumber || null,
+        recipientOrTarget: retiroTargetUse,
+        reason:
+          retiroReason ||
+          (selectedOrder
+            ? `Retiro vinculado a Orden ${selectedOrder.orderNumber}`
+            : 'Retiro confirmado'),
+        notes: retiroNotes,
+        stockBefore: res.stockBefore ?? 0,
+        quantityChanged: retiroQty,
+        stockAfter: res.stockAfter ?? 0,
+      });
+
+      setRetiroProduct(null);
+      if (onClearPreselectedOrder) onClearPreselectedOrder();
       await onRefresh();
     } catch (err: any) {
       setFeedback({ type: 'error', text: err.message });
@@ -504,16 +787,53 @@ export function CatalogAndStockView({
     }
   };
 
+  const capacitiesAvailable = Array.from(
+    new Set(
+      data.products
+        .map((p) => p.capacity)
+        .filter((c) => c && c !== 'N/A' && c.trim() !== '')
+    )
+  );
+
   const filteredProducts = data.products.filter((p) => {
     const q = searchQuery.toLowerCase().trim();
     const matchesSearch =
       !q ||
       p.sku.toLowerCase().includes(q) ||
       p.name.toLowerCase().includes(q) ||
-      p.family.toLowerCase().includes(q);
+      p.family.toLowerCase().includes(q) ||
+      (p.brand && p.brand.toLowerCase().includes(q)) ||
+      (p.model && p.model.toLowerCase().includes(q)) ||
+      (p.capacity && p.capacity.toLowerCase().includes(q));
     const matchesCat = selectedCategory === 'ALL' || p.family === selectedCategory;
-    return matchesSearch && matchesCat;
+    const matchesCap = selectedCapacity === 'ALL' || p.capacity === selectedCapacity;
+    return matchesSearch && matchesCat && matchesCap;
   });
+
+  // Compute live preview for Ingreso Modal
+  const ingresoCurrentAvail = ingresoProduct
+    ? data.balances
+        .filter(
+          (b) =>
+            b.productId === ingresoProduct.id &&
+            b.warehouseId === ingresoWhId &&
+            b.status === 'AVAILABLE'
+        )
+        .reduce((s, b) => s + b.quantity, 0)
+    : 0;
+
+  // Compute live preview for Retiro Modal
+  const retiroCurrentAvail = retiroProduct
+    ? data.balances
+        .filter(
+          (b) =>
+            b.productId === retiroProduct.id &&
+            b.warehouseId === retiroWhId &&
+            (retiroLocId ? b.locationId === retiroLocId : true) &&
+            b.status === 'AVAILABLE'
+        )
+        .reduce((s, b) => s + b.quantity, 0)
+    : 0;
 
   return (
     <div className="space-y-6">
@@ -528,15 +848,322 @@ export function CatalogAndStockView({
           <span className="font-medium">{feedback.text}</span>
           <button
             onClick={() => setFeedback(null)}
-            className="text-xs font-semibold underline ml-4"
+            className="text-xs font-semibold underline ml-4 cursor-pointer"
           >
             Cerrar
           </button>
         </div>
       )}
 
+      {/* Banner if navigated from an Order to withdraw supplies */}
+      {preselectedWithdrawOrderId && (
+        <div className="bg-amber-50 border border-amber-300 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+              <ArrowUpFromLine className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-amber-800">
+                Modo Retiro de Insumos para Orden de Producción
+              </div>
+              <div className="text-sm font-semibold text-slate-900">
+                Haz clic en el botón <strong>"Retirar"</strong> de cualquier empaque, case o
+                adaptador para vincularlo a la orden{' '}
+                <span className="font-mono font-bold text-amber-900">
+                  {data.productionOrders.find((o) => o.id === preselectedWithdrawOrderId)
+                    ?.orderNumber || `#${preselectedWithdrawOrderId}`}
+                </span>
+                .
+              </div>
+            </div>
+          </div>
+          {onClearPreselectedOrder && (
+            <button
+              onClick={onClearPreselectedOrder}
+              className="px-3 py-1.5 text-xs font-bold text-amber-900 bg-amber-200/70 hover:bg-amber-200 rounded-xl cursor-pointer"
+            >
+              Finalizar selección
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ===================================================================== */}
-      {/* SUBVIEW 1: PRODUCTOS Y EXISTENCIAS (TARJETAS GRANDES Y SIMPLES)       */}
+      {/* SUBVIEW 0: RESUMEN OPERATIVO (TOTALES, ALERTAS Y ACCESOS RÁPIDOS)     */}
+      {/* ===================================================================== */}
+      {subView === 'SUMMARY' && (
+        <div className="space-y-6">
+          {(() => {
+            const totalAvailable = data.balances
+              .filter((b) => b.status === 'AVAILABLE')
+              .reduce((s, b) => s + b.quantity, 0);
+            const totalInProduction = data.balances
+              .filter(
+                (b) =>
+                  b.status === 'IN_PRODUCTION_CUSTODY' ||
+                  b.status === 'IN_TRANSIT_PRODUCTION' ||
+                  b.status === 'RESERVED_ORDER'
+              )
+              .reduce((s, b) => s + b.quantity, 0);
+            const totalPendingPickup = data.balances
+              .filter(
+                (b) =>
+                  b.status === 'FINISHED_PENDING_PICKUP' ||
+                  b.status === 'FINISHED_IN_TRANSIT'
+              )
+              .reduce((s, b) => s + b.quantity, 0);
+
+            const lowStockProducts = data.products.filter((p) => {
+              const avail = data.balances
+                .filter((b) => b.productId === p.id && b.status === 'AVAILABLE')
+                .reduce((s, b) => s + b.quantity, 0);
+              return avail <= p.minStockAlert;
+            });
+
+            return (
+              <>
+                <div className="bg-white rounded-2xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs">
+                  <div>
+                    <h2 className="text-xl font-bold text-slate-900">
+                      Resumen Operativo en Tiempo Real
+                    </h2>
+                    <p className="text-xs text-slate-600 mt-1">
+                      Control exacto de stock disponible, componentes en órdenes de producción,
+                      productos terminados por recoger y trazabilidad Kardex.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      onClick={() => setSubView('PRODUCTS')}
+                      className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 cursor-pointer shadow-2xs"
+                    >
+                      <ArrowDownToLine className="w-4 h-4" />
+                      Ingresar o Retirar Stock
+                    </button>
+                    {onNavigateToModule && (
+                      <button
+                        onClick={() => onNavigateToModule('PRODUCTION_ORDERS')}
+                        className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl flex items-center gap-2 cursor-pointer shadow-2xs"
+                      >
+                        <Factory className="w-4 h-4" />
+                        Órdenes de Producción ({openOrders.length})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* 4 KPI Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase text-emerald-700">
+                        Stock Disponible
+                      </span>
+                      <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+                        <TrendingUp className="w-5 h-5" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-mono font-bold text-slate-900 mt-2 tabular-nums">
+                      {formatInt(totalAvailable)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Unidades libres en estantes para retiro o asignación
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase text-sky-700">
+                        En Custodia de Producción
+                      </span>
+                      <div className="w-9 h-9 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center">
+                        <Cpu className="w-5 h-5" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-mono font-bold text-sky-700 mt-2 tabular-nums">
+                      {formatInt(totalInProduction)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Componentes UDP / microSD en órdenes activas ({openOrders.length} OP)
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase text-indigo-700">
+                        Terminados por Recoger
+                      </span>
+                      <div className="w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                        <PackageCheck className="w-5 h-5" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-mono font-bold text-indigo-700 mt-2 tabular-nums">
+                      {formatInt(totalPendingPickup)}
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Productos fabricados listos para entrega o recogida
+                    </div>
+                  </div>
+
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold uppercase text-amber-700">
+                        Catálogo y Almacenes
+                      </span>
+                      <div className="w-9 h-9 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center">
+                        <Building2 className="w-5 h-5" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-mono font-bold text-slate-900 mt-2 tabular-nums">
+                      {formatInt(data.products.length)} SKUs · {data.warehouses.length} Alm.
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {lowStockProducts.length} productos con stock bajo o en cero
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stock Breakdown by Warehouse */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-slate-900">
+                        Estado de Almacenes Autorizados
+                      </h3>
+                      <button
+                        onClick={() => setSubView('WAREHOUSES')}
+                        className="text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+                      >
+                        Administrar almacenes →
+                      </button>
+                    </div>
+                    <div className="space-y-3">
+                      {data.warehouses.map((w) => {
+                        const whAvail = data.balances
+                          .filter((b) => b.warehouseId === w.id && b.status === 'AVAILABLE')
+                          .reduce((s, b) => s + b.quantity, 0);
+                        const whCustody = data.balances
+                          .filter(
+                            (b) =>
+                              b.warehouseId === w.id &&
+                              (b.status === 'IN_PRODUCTION_CUSTODY' ||
+                                b.status === 'IN_TRANSIT_PRODUCTION')
+                          )
+                          .reduce((s, b) => s + b.quantity, 0);
+                        const whPickup = data.balances
+                          .filter(
+                            (b) =>
+                              b.warehouseId === w.id && b.status === 'FINISHED_PENDING_PICKUP'
+                          )
+                          .reduce((s, b) => s + b.quantity, 0);
+
+                        return (
+                          <div
+                            key={w.id}
+                            className="p-3.5 rounded-xl border border-slate-200/80 bg-slate-50/60 flex flex-wrap items-center justify-between gap-3"
+                          >
+                            <div>
+                              <div className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                {w.name}
+                                {w.isProductionPlant && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-sky-100 text-sky-800 font-bold">
+                                    PRODUCCIÓN
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-500 font-mono">{w.code}</div>
+                            </div>
+                            <div className="flex items-center gap-4 text-xs">
+                              <div className="text-right">
+                                <div className="text-slate-500">Disponible</div>
+                                <div className="font-mono font-bold text-emerald-700">
+                                  {formatInt(whAvail)}
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-slate-500">En OP</div>
+                                <div className="font-mono font-bold text-sky-700">
+                                  {formatInt(whCustody)}
+                                </div>
+                              </div>
+                              <div className="text-right">
+                                <div className="text-slate-500">Por Recoger</div>
+                                <div className="font-mono font-bold text-indigo-700">
+                                  {formatInt(whPickup)}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Recent Movements */}
+                  <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-2xs space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-bold text-slate-900">
+                        Últimos Movimientos Registrados
+                      </h3>
+                      {onNavigateToModule && (
+                        <button
+                          onClick={() => onNavigateToModule('KARDEX_REPORTS')}
+                          className="text-xs font-semibold text-blue-600 hover:underline cursor-pointer"
+                        >
+                          Ver Historial y Kardex completo →
+                        </button>
+                      )}
+                    </div>
+                    {data.movementLines.length === 0 ? (
+                      <div className="py-8 text-center text-xs text-slate-400">
+                        Aún no hay movimientos registrados. Usa los botones "Ingresar" o "Retirar"
+                        en Inventario y Productos.
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {data.movementLines.slice(0, 5).map((line) => {
+                          const doc = data.movementDocuments.find(
+                            (d) => d.id === line.documentId
+                          );
+                          return (
+                            <div
+                              key={line.id}
+                              className="p-3 rounded-xl border border-slate-100 bg-slate-50/70 flex items-center justify-between gap-3 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <div className="font-bold text-slate-900 truncate">
+                                  {line.historicalSku} — {line.historicalName}
+                                </div>
+                                <div className="text-slate-500 truncate">
+                                  <span className="font-mono font-semibold text-slate-700">
+                                    {doc?.folio}
+                                  </span>{' '}
+                                  · {doc?.reason || doc?.movementType}
+                                </div>
+                              </div>
+                              <div className="text-right shrink-0">
+                                <div className="font-mono font-bold text-slate-900">
+                                  {formatInt(line.quantity)} u.
+                                </div>
+                                <div className="text-[10px] text-slate-400 font-mono">
+                                  {formatBoliviaDateTime(line.createdAt)}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* SUBVIEW 1: INVENTARIO Y PRODUCTOS (CON BOTONES INGRESAR Y RETIRAR)    */}
       {/* ===================================================================== */}
       {subView === 'PRODUCTS' && (
         <div className="space-y-6">
@@ -558,6 +1185,14 @@ export function CatalogAndStockView({
                   (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
               )
               .reduce((s, b) => s + b.quantity, 0);
+            const totalPendingPickup = data.balances
+              .filter(
+                (b) =>
+                  (b.status === 'FINISHED_PENDING_PICKUP' ||
+                    b.status === 'FINISHED_IN_TRANSIT') &&
+                  (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+              )
+              .reduce((s, b) => s + b.quantity, 0);
 
             return (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -567,7 +1202,7 @@ export function CatalogAndStockView({
                   </div>
                   <div>
                     <div className="text-[11px] font-semibold text-slate-500">
-                      Productos Registrados
+                      Productos en Catálogo
                     </div>
                     <div className="text-xl font-mono font-bold text-slate-900">
                       {formatInt(data.products.length)}
@@ -595,7 +1230,7 @@ export function CatalogAndStockView({
                   </div>
                   <div>
                     <div className="text-[11px] font-semibold text-slate-500">
-                      En Producción / Orden
+                      En Custodia / Orden
                     </div>
                     <div className="text-xl font-mono font-bold text-sky-700">
                       {formatInt(totalInProcess)}
@@ -604,15 +1239,15 @@ export function CatalogAndStockView({
                 </div>
 
                 <div className="bg-white rounded-2xl border border-slate-200 p-4 flex items-center gap-3.5 shadow-2xs">
-                  <div className="w-11 h-11 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
-                    <Building2 className="w-5 h-5" />
+                  <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
+                    <PackageCheck className="w-5 h-5" />
                   </div>
                   <div>
                     <div className="text-[11px] font-semibold text-slate-500">
-                      Almacenes Activos
+                      Terminado por Recoger
                     </div>
-                    <div className="text-xl font-mono font-bold text-slate-900">
-                      {formatInt(data.warehouses.length)}
+                    <div className="text-xl font-mono font-bold text-indigo-700">
+                      {formatInt(totalPendingPickup)}
                     </div>
                   </div>
                 </div>
@@ -620,15 +1255,15 @@ export function CatalogAndStockView({
             );
           })()}
 
-          {/* Top Action & Search Header */}
-          <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs">
+          {/* Search, Warehouse, Capacity Filter & Actions Bar */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 shadow-2xs">
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Buscar producto por SKU, descripción o departamento..."
+                placeholder="Buscar por SKU, nombre, marca, capacidad (ej. 8 GB) o categoría..."
                 className="w-full pl-10 pr-4 py-2.5 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-600 transition-shadow"
               />
             </div>
@@ -651,23 +1286,68 @@ export function CatalogAndStockView({
                 ))}
               </select>
 
+              {capacitiesAvailable.length > 0 && (
+                <select
+                  value={selectedCapacity}
+                  onChange={(e) => setSelectedCapacity(e.target.value)}
+                  className="text-xs border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold text-slate-700 cursor-pointer"
+                >
+                  <option value="ALL">Todas las Capacidades</option>
+                  {capacitiesAvailable.map((cap) => (
+                    <option key={cap} value={cap}>
+                      Capacidad: {cap}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {/* View Mode Toggle */}
+              <div className="inline-flex rounded-xl border border-slate-200 bg-slate-100 p-1">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('CARDS')}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer ${
+                    viewMode === 'CARDS'
+                      ? 'bg-white text-slate-900 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="Vista en tarjetas con foto"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  Tarjetas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('TABLE')}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer ${
+                    viewMode === 'TABLE'
+                      ? 'bg-white text-slate-900 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="Vista en tabla compacta"
+                >
+                  <List className="w-3.5 h-3.5" />
+                  Tabla
+                </button>
+              </div>
+
               {isAdmin && (
                 <>
                   <motion.button
                     whileTap={{ scale: 0.97 }}
                     type="button"
                     onClick={() => setSubView('CATEGORIES')}
-                    className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="px-3.5 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <FolderKanban className="w-4 h-4 text-slate-600" />
-                    Clasificaciones ({data.categories.length})
+                    Categorías ({data.categories.length})
                   </motion.button>
 
                   <motion.button
                     whileTap={{ scale: 0.97 }}
                     type="button"
                     onClick={openCreateProductModal}
-                    className="px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 rounded-xl transition-all shadow-sm shadow-blue-600/20 flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="px-4 py-2.5 text-xs font-bold text-white bg-gradient-to-r from-blue-600 to-sky-600 hover:from-blue-700 hover:to-sky-700 rounded-xl transition-all shadow-sm shadow-blue-600/20 flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     <Plus className="w-4 h-4" />
                     Nuevo Producto
@@ -677,7 +1357,7 @@ export function CatalogAndStockView({
             </div>
           </div>
 
-          {/* Interactive Classification Filter Tabs with Custom Icons */}
+          {/* Interactive Classification Filter Tabs */}
           <div className="flex items-center gap-2 overflow-x-auto pb-1">
             <button
               onClick={() => setSelectedCategory('ALL')}
@@ -728,8 +1408,8 @@ export function CatalogAndStockView({
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
                   {data.products.length === 0
-                    ? 'Registra tus primeros componentes o productos (por ejemplo: Chips UDP, Cases, Empaques o Memorias microSD) con su SKU, descripción, clasificación, cantidad y fotografía.'
-                    : 'Prueba cambiando el término de búsqueda o seleccionando otra clasificación.'}
+                    ? 'Registra tus primeros componentes o productos (por ejemplo: Chips UDP, Cases, Empaques, Memorias microSD o USB Terminados) y usa los botones "Ingresar" y "Retirar" para gestionar existencias con trazabilidad completa.'
+                    : 'Prueba cambiando el término de búsqueda o seleccionando otra categoría o almacén.'}
                 </p>
               </div>
               {isAdmin && (
@@ -747,13 +1427,15 @@ export function CatalogAndStockView({
                     onClick={() => setSubView('CATEGORIES')}
                     className="px-4 py-2.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
                   >
-                    Configurar Clasificaciones
+                    Configurar Categorías
                   </button>
                 </div>
               )}
             </motion.div>
-          ) : (
-            /* Clean Visual Product Cards Grid with Motion Transitions */
+          ) : viewMode === 'CARDS' ? (
+            /* =============================================================== */
+            /* CARDS VIEW WITH PROMINENT "INGRESAR" AND "RETIRAR" BUTTONS       */
+            /* =============================================================== */
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
               <AnimatePresence mode="popLayout">
                 {filteredProducts.map((product) => {
@@ -781,6 +1463,7 @@ export function CatalogAndStockView({
                         b.status === 'FINISHED_IN_TRANSIT'
                     )
                     .reduce((s, b) => s + b.quantity, 0);
+                  const totalPhysicalQty = availableQty + inProductionQty + pendingPickupQty;
 
                   const DeptIcon = getDepartmentIcon(product.family, product.productType);
 
@@ -813,10 +1496,17 @@ export function CatalogAndStockView({
                             </div>
                           )}
                           <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent flex items-end justify-between p-3.5">
-                            <div className="text-xs font-mono font-bold text-white bg-black/40 backdrop-blur-xs px-2.5 py-1 rounded-lg border border-white/15">
-                              {product.sku}
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs font-mono font-bold text-white bg-black/50 backdrop-blur-xs px-2.5 py-1 rounded-lg border border-white/15">
+                                {product.sku}
+                              </span>
+                              {product.capacity && product.capacity !== 'N/A' && (
+                                <span className="text-[11px] font-mono font-bold text-amber-300 bg-black/50 backdrop-blur-xs px-2 py-1 rounded-lg border border-amber-400/30">
+                                  {product.capacity}
+                                </span>
+                              )}
                             </div>
-                            <div className="text-xs font-semibold text-sky-300 flex items-center gap-1.5 bg-slate-950/60 backdrop-blur-xs px-2.5 py-1 rounded-lg">
+                            <div className="text-xs font-semibold text-sky-300 flex items-center gap-1.5 bg-slate-950/70 backdrop-blur-xs px-2.5 py-1 rounded-lg">
                               <DeptIcon className="w-3.5 h-3.5" />
                               {product.family}
                             </div>
@@ -825,29 +1515,45 @@ export function CatalogAndStockView({
 
                         {/* Product Description & Balances */}
                         <div className="p-4 space-y-3">
-                          <h3 className="text-base font-bold text-slate-900 leading-snug">
-                            {product.name}
-                          </h3>
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <h3 className="text-base font-bold text-slate-900 leading-snug">
+                                {product.name}
+                              </h3>
+                              {(product.brand !== product.family ||
+                                (product.model && product.model !== 'Estándar')) && (
+                                <div className="text-[11px] text-slate-500 mt-0.5">
+                                  Marca: <strong>{product.brand}</strong>
+                                  {product.model && product.model !== 'Estándar'
+                                    ? ` · Modelo: ${product.model}`
+                                    : ''}
+                                </div>
+                              )}
+                            </div>
+                            <span className="text-[11px] font-mono font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md shrink-0">
+                              Total: {formatInt(totalPhysicalQty)}
+                            </span>
+                          </div>
 
                           <div className="grid grid-cols-3 gap-2 pt-1">
-                            <div className="p-2.5 bg-emerald-50/60 border border-emerald-100 rounded-xl">
-                              <div className="text-[11px] font-medium text-emerald-800">
+                            <div className="p-2.5 bg-emerald-50/70 border border-emerald-200/80 rounded-xl">
+                              <div className="text-[10px] font-bold uppercase text-emerald-800">
                                 Disponible
                               </div>
                               <div className="text-base font-mono font-bold text-emerald-700 tabular-nums">
                                 {formatInt(availableQty)}
                               </div>
                             </div>
-                            <div className="p-2.5 bg-sky-50/60 border border-sky-100 rounded-xl">
-                              <div className="text-[11px] font-medium text-sky-800">
-                                Producción
+                            <div className="p-2.5 bg-sky-50/70 border border-sky-200/80 rounded-xl">
+                              <div className="text-[10px] font-bold uppercase text-sky-800">
+                                En Orden / OP
                               </div>
                               <div className="text-base font-mono font-semibold text-sky-700 tabular-nums">
                                 {formatInt(inProductionQty)}
                               </div>
                             </div>
-                            <div className="p-2.5 bg-indigo-50/60 border border-indigo-100 rounded-xl">
-                              <div className="text-[11px] font-medium text-indigo-800">
+                            <div className="p-2.5 bg-indigo-50/70 border border-indigo-200/80 rounded-xl">
+                              <div className="text-[10px] font-bold uppercase text-indigo-800">
                                 Por Recoger
                               </div>
                               <div className="text-base font-mono font-semibold text-indigo-700 tabular-nums">
@@ -862,7 +1568,7 @@ export function CatalogAndStockView({
                               <div className="text-[11px] font-medium text-slate-500">
                                 Ubicación actual del stock:
                               </div>
-                              {prodBalances.map((b) => {
+                              {prodBalances.slice(0, 3).map((b) => {
                                 const wh = data.warehouses.find((w) => w.id === b.warehouseId);
                                 const loc = data.locations.find((l) => l.id === b.locationId);
                                 return (
@@ -891,82 +1597,246 @@ export function CatalogAndStockView({
                         </div>
                       </div>
 
-                      {/* Card Footer Actions: Add Stock, Edit, Delete */}
-                      <div className="px-4 py-3 bg-slate-50/80 border-t border-slate-200/80 flex items-center justify-between gap-2">
-                        <motion.button
-                          whileTap={{ scale: 0.96 }}
-                          type="button"
-                          onClick={() => {
-                            setQuickStockProduct(product);
-                            setQuickStockQty(500);
-                            setQuickStockWhId(data.warehouses[0]?.id || 0);
-                          }}
-                          className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
-                        >
-                          <ArrowDownToLine className="w-3.5 h-3.5" />
-                          Ingresar Stock
-                        </motion.button>
+                      {/* Card Footer Actions: INGRESAR & RETIRAR + Detail & History */}
+                      <div className="p-3.5 bg-slate-50/90 border-t border-slate-200/80 space-y-2.5">
+                        {/* Primary Action Pair: Ingresar & Retirar */}
+                        <div className="grid grid-cols-2 gap-2">
+                          <motion.button
+                            whileTap={{ scale: 0.96 }}
+                            type="button"
+                            onClick={() => openIngresarModal(product)}
+                            className="py-2.5 px-3 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                          >
+                            <ArrowDownToLine className="w-4 h-4 shrink-0" />
+                            <span>Ingresar</span>
+                          </motion.button>
 
-                        {isAdmin && (
+                          <motion.button
+                            whileTap={{ scale: 0.96 }}
+                            type="button"
+                            onClick={() => openRetirarModal(product)}
+                            className="py-2.5 px-3 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                          >
+                            <ArrowUpFromLine className="w-4 h-4 shrink-0" />
+                            <span>Retirar</span>
+                          </motion.button>
+                        </div>
+
+                        {/* Secondary Action Row: Ver detalle, Ver historial, Editar, Eliminar */}
+                        <div className="flex items-center justify-between gap-1.5 pt-1 border-t border-slate-200/60">
                           <div className="flex items-center gap-1.5">
-                            <motion.button
-                              whileTap={{ scale: 0.95 }}
+                            <button
                               type="button"
-                              onClick={() => openEditProductModal(product)}
-                              className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-xl flex items-center gap-1.5 cursor-pointer"
-                              title="Editar producto"
+                              onClick={() => setDetailProduct(product)}
+                              className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg flex items-center gap-1 cursor-pointer"
                             >
-                              <Edit3 className="w-3.5 h-3.5" />
-                              Editar
-                            </motion.button>
-                            <motion.button
-                              whileTap={{ scale: 0.95 }}
-                              type="button"
-                              onClick={() => setDeleteConfirmProduct(product)}
-                              className="p-2 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-xl cursor-pointer"
-                              title="Eliminar producto"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </motion.button>
+                              <Eye className="w-3.5 h-3.5 text-slate-500" />
+                              Ver detalle
+                            </button>
+                            {onNavigateToModule && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onNavigateToModule('KARDEX_REPORTS', {
+                                    productId: product.id,
+                                  })
+                                }
+                                className="px-2.5 py-1.5 text-[11px] font-semibold text-blue-700 bg-blue-50/80 border border-blue-200 hover:bg-blue-100 rounded-lg flex items-center gap-1 cursor-pointer"
+                              >
+                                <History className="w-3.5 h-3.5" />
+                                Historial
+                              </button>
+                            )}
                           </div>
-                        )}
+
+                          {isAdmin && (
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => openEditProductModal(product)}
+                                className="p-1.5 text-slate-600 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                                title="Editar ficha de producto"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setDeleteConfirmProduct(product)}
+                                className="p-1.5 text-red-600 bg-white border border-red-200 hover:bg-red-50 rounded-lg cursor-pointer"
+                                title="Eliminar producto"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </motion.div>
                   );
                 })}
               </AnimatePresence>
             </div>
+          ) : (
+            /* =============================================================== */
+            /* COMPACT TABLE VIEW WITH "INGRESAR" AND "RETIRAR" BUTTONS        */
+            /* =============================================================== */
+            <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-2xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase text-slate-500">
+                      <th className="py-3.5 px-4">Foto / SKU</th>
+                      <th className="py-3.5 px-4">Producto / Categoría</th>
+                      <th className="py-3.5 px-4 text-right">Disponible</th>
+                      <th className="py-3.5 px-4 text-right">En OP</th>
+                      <th className="py-3.5 px-4 text-right">Por Recoger</th>
+                      <th className="py-3.5 px-4 text-right">Acciones Operativas</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {filteredProducts.map((product) => {
+                      const prodBalances = data.balances.filter(
+                        (b) =>
+                          b.productId === product.id &&
+                          (selectedWarehouseId === 'ALL' || b.warehouseId === selectedWarehouseId)
+                      );
+                      const availableQty = prodBalances
+                        .filter((b) => b.status === 'AVAILABLE')
+                        .reduce((s, b) => s + b.quantity, 0);
+                      const inProductionQty = prodBalances
+                        .filter(
+                          (b) =>
+                            b.status === 'IN_PRODUCTION_CUSTODY' ||
+                            b.status === 'IN_TRANSIT_PRODUCTION' ||
+                            b.status === 'RESERVED_ORDER'
+                        )
+                        .reduce((s, b) => s + b.quantity, 0);
+                      const pendingPickupQty = prodBalances
+                        .filter(
+                          (b) =>
+                            b.status === 'FINISHED_PENDING_PICKUP' ||
+                            b.status === 'FINISHED_IN_TRANSIT'
+                        )
+                        .reduce((s, b) => s + b.quantity, 0);
+
+                      return (
+                        <tr key={product.id} className="hover:bg-slate-50">
+                          <td className="py-3 px-4">
+                            <div className="flex items-center gap-3">
+                              <img
+                                src={product.imageUrl}
+                                alt={product.name}
+                                onClick={() => setZoomPhotoProduct(product)}
+                                className="w-11 h-11 rounded-xl object-cover border border-slate-200 cursor-pointer shrink-0"
+                              />
+                              <div>
+                                <div className="font-mono font-bold text-slate-900">
+                                  {product.sku}
+                                </div>
+                                {product.capacity && product.capacity !== 'N/A' && (
+                                  <span className="text-[10px] font-mono font-semibold text-slate-500">
+                                    {product.capacity}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900 text-sm">{product.name}</div>
+                            <div className="text-slate-500">{product.family}</div>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-bold text-sm text-emerald-700">
+                            {formatInt(availableQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-sky-700">
+                            {formatInt(inProductionQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono font-semibold text-indigo-700">
+                            {formatInt(pendingPickupQty)}
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                onClick={() => openIngresarModal(product)}
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                              >
+                                <ArrowDownToLine className="w-3.5 h-3.5" />
+                                Ingresar
+                              </button>
+                              <button
+                                onClick={() => openRetirarModal(product)}
+                                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg flex items-center gap-1 cursor-pointer"
+                              >
+                                <ArrowUpFromLine className="w-3.5 h-3.5" />
+                                Retirar
+                              </button>
+                              <button
+                                onClick={() => setDetailProduct(product)}
+                                className="px-2.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg cursor-pointer"
+                              >
+                                Detalle
+                              </button>
+                              {onNavigateToModule && (
+                                <button
+                                  onClick={() =>
+                                    onNavigateToModule('KARDEX_REPORTS', {
+                                      productId: product.id,
+                                    })
+                                  }
+                                  className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold rounded-lg cursor-pointer"
+                                >
+                                  Historial
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* SUBVIEW 2: GESTOR DE CLASIFICACIONES / DEPARTAMENTOS                  */}
+      {/* SUBVIEW 2: GESTOR DE CATEGORÍAS / DEPARTAMENTOS                       */}
       {/* ===================================================================== */}
       {subView === 'CATEGORIES' && (
         <div className="space-y-6">
           <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="text-lg font-bold text-slate-900">
-                Clasificaciones y Departamentos de Productos
+                Categorías y Departamentos de Inventario
               </h2>
               <p className="text-xs text-slate-600 mt-0.5">
                 Crea, edita o elimina los departamentos de tu inventario (por ejemplo:{' '}
-                <strong>Empaques</strong>, <strong>Cases</strong>, <strong>Chips UDP</strong>,{' '}
-                <strong>Memorias microSD</strong>, <strong>Adaptadores</strong> o nuevos
-                departamentos).
+                <strong>Chips UDP</strong>, <strong>Memorias microSD</strong>,{' '}
+                <strong>Empaques</strong>, <strong>Cases</strong>, <strong>Adaptadores</strong> o{' '}
+                <strong>Producto Terminado</strong>).
               </p>
             </div>
-            {isAdmin && (
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={openCreateCategoryModal}
-                className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg flex items-center gap-2"
+                onClick={() => setSubView('PRODUCTS')}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
               >
-                <Plus className="w-4 h-4" />
-                Nueva Clasificación / Departamento
+                ← Volver a Productos
               </button>
-            )}
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={openCreateCategoryModal}
+                  className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg flex items-center gap-2 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Nueva Categoría
+                </button>
+              )}
+            </div>
           </div>
 
           {data.categories.length === 0 ? (
@@ -980,10 +1850,11 @@ export function CatalogAndStockView({
               </div>
               <div className="space-y-1">
                 <h3 className="text-base font-bold text-slate-900">
-                  Sin clasificaciones registradas
+                  Sin categorías registradas
                 </h3>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Todas las clasificaciones anteriores fueron eliminadas. Crea tus propios departamentos personalizados (ej. Empaques, Cases, Memorias, etc.).
+                  Crea tus propios departamentos personalizados (ej. Chips UDP, Empaques, Cases,
+                  Memorias microSD, Producto Terminado).
                 </p>
               </div>
               {isAdmin && (
@@ -993,7 +1864,7 @@ export function CatalogAndStockView({
                   className="px-5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl inline-flex items-center gap-2 cursor-pointer shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  Crear Primera Clasificación
+                  Crear Primera Categoría
                 </button>
               )}
             </motion.div>
@@ -1029,7 +1900,7 @@ export function CatalogAndStockView({
                           {translateAccountingType(cat.accountingType)}
                         </div>
                         {cat.description && (
-                          <p className="text-xs text-slate-600 mt-1.5">{cat.description}</p>
+                          <p className="text-xs text-slate-600 mt-1">{cat.description}</p>
                         )}
                       </div>
 
@@ -1038,7 +1909,7 @@ export function CatalogAndStockView({
                           <button
                             type="button"
                             onClick={() => openEditCategoryModal(cat)}
-                            className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl flex items-center gap-1 cursor-pointer"
+                            className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center gap-1 cursor-pointer"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                             Editar
@@ -1046,7 +1917,7 @@ export function CatalogAndStockView({
                           <button
                             type="button"
                             onClick={() => handleDeleteCategory(cat)}
-                            className="px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 rounded-xl flex items-center gap-1 cursor-pointer"
+                            className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded-lg flex items-center gap-1 cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                             Eliminar
@@ -1063,83 +1934,176 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* SUBVIEW 3: CONFIGURACIÓN DE ALMACENES Y UBICACIONES                   */}
+      {/* SUBVIEW 3: ALMACENES Y UBICACIONES (CON SLIDE-TO-DELETE IPHONE)       */}
       {/* ===================================================================== */}
       {subView === 'WAREHOUSES' && (
         <div className="space-y-6">
-          <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <h2 className="text-lg font-bold text-slate-900">
-                Gestión de Almacenes y Estantes
-              </h2>
-              <p className="text-xs text-slate-600 mt-0.5">
-                Crea nuevos almacenes o elimina almacenes existentes con confirmación deslizante de seguridad.
-              </p>
-            </div>
-            <div className="text-xs font-mono font-semibold text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg">
-              {data.warehouses.length} almacenes activos
-            </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {isAdmin && (
+              <form
+                onSubmit={handleCreateWarehouse}
+                className="bg-white rounded-xl border border-slate-200 p-6 space-y-4"
+              >
+                <h2 className="text-base font-bold text-slate-900">Crear Nuevo Almacén</h2>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Nombre del Almacén *
+                  </label>
+                  <input
+                    type="text"
+                    value={whName}
+                    onChange={(e) => setWhName(e.target.value)}
+                    placeholder="Ej. Sencata, Villa Dolores, Puente Bolivia"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">
+                    Dirección / Referencia
+                  </label>
+                  <input
+                    type="text"
+                    value={whAddress}
+                    onChange={(e) => setWhAddress(e.target.value)}
+                    placeholder="Ej. Av. 6 de Marzo"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-slate-700 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={whIsPlant}
+                    onChange={(e) => setWhIsPlant(e.target.checked)}
+                    className="rounded border-slate-300"
+                  />
+                  Este almacén funciona como Taller / Planta de Producción
+                </label>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer"
+                >
+                  Guardar Almacén
+                </button>
+              </form>
+            )}
+
+            {isAdmin && (
+              <form
+                onSubmit={handleCreateLocation}
+                className="bg-white rounded-xl border border-slate-200 p-6 space-y-4"
+              >
+                <h2 className="text-base font-bold text-slate-900">
+                  Agregar Estante / Ubicación Interna
+                </h2>
+                <div>
+                  <label className="block text-xs font-medium text-slate-700 mb-1">Almacén *</label>
+                  <select
+                    value={locWhId}
+                    onChange={(e) => setLocWhId(Number(e.target.value))}
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  >
+                    {data.warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Sección / Cuarto *
+                    </label>
+                    <input
+                      type="text"
+                      value={locZone}
+                      onChange={(e) => setLocZone(e.target.value)}
+                      placeholder="Ej. Sección A"
+                      className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-700 mb-1">
+                      Estante / Nivel *
+                    </label>
+                    <input
+                      type="text"
+                      value={locShelf}
+                      onChange={(e) => setLocShelf(e.target.value)}
+                      placeholder="Ej. Estante 1"
+                      className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                      required
+                    />
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg cursor-pointer"
+                >
+                  Añadir Estante
+                </button>
+              </form>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {data.warehouses.map((w) => {
               const locs = data.locations.filter((l) => l.warehouseId === w.id);
-              const stockInWh = data.balances
+              const stockCount = data.balances
                 .filter((b) => b.warehouseId === w.id)
                 .reduce((acc, b) => acc + b.quantity, 0);
-
               return (
                 <div
                   key={w.id}
-                  className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between gap-4 shadow-xs"
+                  className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col justify-between gap-4"
                 >
-                  <div>
-                    <div className="flex items-center justify-between text-xs text-slate-500">
-                      <span className="font-mono font-bold text-slate-800">{w.code}</span>
-                      <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-medium">
-                        {w.isProductionPlant ? 'Planta / Taller Producción' : 'Almacén Físico'}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between mt-1.5">
-                      <h3 className="text-base font-bold text-slate-900">{w.name}</h3>
-                      <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md">
-                        {formatInt(stockInWh)} uds.
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-600 mt-1">{w.description}</p>
-                    {w.address && (
-                      <p className="text-[11px] text-slate-400 mt-0.5">📍 {w.address}</p>
-                    )}
-
-                    <div className="mt-4 pt-3 border-t border-slate-100">
-                      <div className="text-xs font-semibold text-slate-700 mb-2">
-                        Secciones / Estantes ({locs.length}):
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <span className="font-mono text-xs text-slate-500">{w.code}</span>
+                        <h3 className="text-base font-bold text-slate-900">{w.name}</h3>
+                        <p className="text-xs text-slate-500">
+                          {w.address || 'Sin dirección especificada'}
+                        </p>
                       </div>
-                      <ul className="space-y-1.5 text-xs">
-                        {locs.map((l) => (
-                          <li
-                            key={l.id}
-                            className="p-2 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-between gap-2"
-                          >
-                            <span className="truncate">
-                              {l.zoneName} › <strong>{l.shelfName}</strong>
-                            </span>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <span className="font-mono text-[10px] text-slate-400">{l.code}</span>
-                              {isAdmin && locs.length > 1 && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteLocation(l.id, l.shelfName)}
-                                  title="Eliminar estante"
-                                  className="p-1 text-slate-400 hover:text-red-600 rounded cursor-pointer"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              )}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
+                      <div className="flex flex-col items-end gap-1">
+                        {w.isProductionPlant && (
+                          <span className="text-[11px] font-semibold px-2 py-0.5 bg-sky-50 text-sky-700 border border-sky-200 rounded">
+                            Taller Producción
+                          </span>
+                        )}
+                        <span className="text-[11px] font-mono font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                          {formatInt(stockCount)} u. en stock
+                        </span>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5 pt-2 border-t border-slate-100 text-xs">
+                      <div className="font-semibold text-slate-600">
+                        Estantes y ubicaciones ({locs.length}):
+                      </div>
+                      {locs.map((l) => (
+                        <div
+                          key={l.id}
+                          className="flex items-center justify-between p-2 bg-slate-50 rounded"
+                        >
+                          <span>
+                            <strong>{l.zoneName}</strong> · {l.shelfName}
+                          </span>
+                          {isAdmin && locs.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteLocation(l.id, l.shelfName)}
+                              className="text-red-600 hover:underline text-[11px] cursor-pointer"
+                            >
+                              Quitar
+                            </button>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   </div>
 
@@ -1159,134 +2123,978 @@ export function CatalogAndStockView({
               );
             })}
           </div>
-
-          {isAdmin && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <form
-                onSubmit={handleCreateWarehouse}
-                className="bg-white rounded-xl border border-slate-200 p-5 space-y-4"
-              >
-                <h3 className="text-sm font-bold text-slate-900">Crear Nuevo Almacén</h3>
-                <div className="space-y-3 text-xs">
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      Nombre del Almacén
-                    </label>
-                    <input
-                      type="text"
-                      value={whName}
-                      onChange={(e) => setWhName(e.target.value)}
-                      placeholder="Ej. Almacén Central / Planta 2"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      Dirección o Referencia
-                    </label>
-                    <input
-                      type="text"
-                      value={whAddress}
-                      onChange={(e) => setWhAddress(e.target.value)}
-                      placeholder="Ubicación física"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                    />
-                  </div>
-                  <label className="flex items-center gap-2 font-medium text-slate-700">
-                    <input
-                      type="checkbox"
-                      checked={whIsPlant}
-                      onChange={(e) => setWhIsPlant(e.target.checked)}
-                    />
-                    Este almacén funciona como Taller de Producción / Ensamblaje
-                  </label>
-                </div>
-                <button
-                  type="submit"
-                  disabled={submitting || !isOnline}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800"
-                >
-                  Guardar Almacén
-                </button>
-              </form>
-
-              <form
-                onSubmit={handleCreateLocation}
-                className="bg-white rounded-xl border border-slate-200 p-5 space-y-4"
-              >
-                <h3 className="text-sm font-bold text-slate-900">
-                  Agregar Sección / Estante a un Almacén
-                </h3>
-                <div className="space-y-3 text-xs">
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">Almacén</label>
-                    <select
-                      value={locWhId}
-                      onChange={(e) => setLocWhId(Number(e.target.value))}
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
-                    >
-                      {data.warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {w.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      Sección o Cuarto (Ej. Sección K / Cuarto de Empaques)
-                    </label>
-                    <input
-                      type="text"
-                      value={locZone}
-                      onChange={(e) => setLocZone(e.target.value)}
-                      placeholder="Sección K"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-medium text-slate-700 mb-1">
-                      Estante o Casillero (Ej. Estante 2)
-                    </label>
-                    <input
-                      type="text"
-                      value={locShelf}
-                      onChange={(e) => setLocShelf(e.target.value)}
-                      placeholder="Estante 2"
-                      className="w-full border border-slate-300 rounded-lg px-3 py-2"
-                      required
-                    />
-                  </div>
-                </div>
-                <button
-                  type="submit"
-                  disabled={submitting || !isOnline}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800"
-                >
-                  Agregar Ubicación
-                </button>
-              </form>
-            </div>
-          )}
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL SIMPLIFICADO: CREAR O EDITAR PRODUCTO (Solo 5 Campos Claros)    */}
+      {/* MODAL 1: INGRESAR STOCK (CON VISTA PREVIA ANTES/DESPUÉS Y COMPROBANTE)*/}
+      {/* ===================================================================== */}
+      {ingresoProduct && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                  <ArrowDownToLine className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Ingresar Stock al Almacén
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Aumenta el saldo disponible con registro auditable y folio único
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIngresoProduct(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Product Mini Card */}
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center gap-3.5">
+              <img
+                src={ingresoProduct.imageUrl}
+                alt={ingresoProduct.name}
+                className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
+              />
+              <div className="min-w-0 flex-1">
+                <span className="text-xs font-mono font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                  {ingresoProduct.sku}
+                </span>
+                <h4 className="text-sm font-bold text-slate-900 truncate mt-1">
+                  {ingresoProduct.name}
+                </h4>
+                <div className="text-xs text-slate-500">{ingresoProduct.family}</div>
+              </div>
+            </div>
+
+            <form onSubmit={handleConfirmIngreso} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Almacén Destino *
+                  </label>
+                  <select
+                    value={ingresoWhId}
+                    onChange={(e) => {
+                      const newWh = Number(e.target.value);
+                      setIngresoWhId(newWh);
+                      const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
+                      setIngresoLocId(firstLoc?.id || 0);
+                    }}
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
+                  >
+                    {data.warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Ubicación / Estante *
+                  </label>
+                  <select
+                    value={ingresoLocId}
+                    onChange={(e) => setIngresoLocId(Number(e.target.value))}
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white"
+                  >
+                    {data.locations
+                      .filter((l) => l.warehouseId === ingresoWhId)
+                      .map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.zoneName} · {l.shelfName}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-slate-700">
+                    Cantidad a Ingresar (Unidades enteras) *
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {[100, 500, 1000, 5000, 20000].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setIngresoQty(preset)}
+                        className="px-2 py-0.5 text-[11px] font-mono font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-md cursor-pointer"
+                      >
+                        +{formatInt(preset)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={ingresoQty}
+                  onChange={(e) => setIngresoQty(Math.max(1, Math.floor(Number(e.target.value))))}
+                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Motivo del Ingreso *</label>
+                <select
+                  value={ingresoMovementType}
+                  onChange={(e) => setIngresoMovementType(e.target.value as any)}
+                  className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-medium"
+                >
+                  <option value="INGRESO_PROVEEDOR">Recepción de mercancía / proveedor</option>
+                  <option value="DEVOLUCION_INSUMOS">
+                    Devolución de insumos no utilizados
+                  </option>
+                  {isAdmin && (
+                    <option value="REGULARIZACION_AUTORIZADA">
+                      Regularización autorizada de inventario
+                    </option>
+                  )}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Proveedor / Contenedor / Ref.
+                  </label>
+                  <input
+                    type="text"
+                    value={ingresoSupplier}
+                    onChange={(e) => setIngresoSupplier(e.target.value)}
+                    placeholder="Ej. Contenedor #402 / Guía"
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Notas / Observaciones
+                  </label>
+                  <input
+                    type="text"
+                    value={ingresoNotes}
+                    onChange={(e) => setIngresoNotes(e.target.value)}
+                    placeholder="Detalle adicional opcional"
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2"
+                  />
+                </div>
+              </div>
+
+              {/* Live Mathematical Preview Box */}
+              <div className="p-3.5 bg-emerald-50/80 border border-emerald-200 rounded-xl grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-[11px] font-medium text-emerald-900">Saldo Anterior</div>
+                  <div className="text-base font-mono font-bold text-slate-800">
+                    {formatInt(ingresoCurrentAvail)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium text-emerald-900">Ingreso</div>
+                  <div className="text-base font-mono font-bold text-emerald-700">
+                    +{formatInt(ingresoQty > 0 ? ingresoQty : 0)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-bold text-emerald-950">Saldo Resultante</div>
+                  <div className="text-base font-mono font-extrabold text-emerald-800">
+                    {formatInt(ingresoCurrentAvail + (ingresoQty > 0 ? ingresoQty : 0))}
+                  </div>
+                </div>
+              </div>
+
+              {canViewCosts && (
+                <div className="pt-2 border-t border-slate-200 space-y-3">
+                  <label className="flex items-center gap-2 font-semibold text-amber-900 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={ingresoIncludeCost}
+                      onChange={(e) => setIngresoIncludeCost(e.target.checked)}
+                    />
+                    Registrar Costo Privado de Compra (Opcional - Solo Propietario)
+                  </label>
+
+                  {ingresoIncludeCost && (
+                    <div className="grid grid-cols-3 gap-2 p-3 bg-amber-50/70 border border-amber-200 rounded-xl">
+                      <div>
+                        <label className="block text-[11px] text-amber-900 mb-1">
+                          FOB Total (USD)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={ingresoFobCost}
+                          onChange={(e) => setIngresoFobCost(Number(e.target.value))}
+                          className="w-full font-mono border border-amber-300 rounded-lg px-2 py-1 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-amber-900 mb-1">
+                          Flete (USD)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={ingresoFreightCost}
+                          onChange={(e) => setIngresoFreightCost(Number(e.target.value))}
+                          className="w-full font-mono border border-amber-300 rounded-lg px-2 py-1 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-amber-900 mb-1">
+                          Aduana/Póliza
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={ingresoCustomsCost}
+                          onChange={(e) => setIngresoCustomsCost(Number(e.target.value))}
+                          className="w-full font-mono border border-amber-300 rounded-lg px-2 py-1 bg-white"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIngresoProduct(null)}
+                  className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting || ingresoQty <= 0}
+                  className="px-5 py-2.5 font-bold text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <Check className="w-4 h-4" />
+                  {submitting ? 'Registrando...' : 'Confirmar Ingreso'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 2: RETIRAR STOCK (VINCULADO A ORDEN OP / USO / TRANSFERENCIA)   */}
+      {/* ===================================================================== */}
+      {retiroProduct && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl border border-slate-200 my-8">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3.5">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+                  <ArrowUpFromLine className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Retirar Producto / Insumos de Almacén
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Descuenta inmediatamente del stock disponible con trazabilidad completa
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setRetiroProduct(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Product Mini Card */}
+            <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3.5">
+              <div className="flex items-center gap-3 min-w-0">
+                <img
+                  src={retiroProduct.imageUrl}
+                  alt={retiroProduct.name}
+                  className="w-14 h-14 rounded-xl object-cover border border-slate-200 shrink-0"
+                />
+                <div className="min-w-0">
+                  <span className="text-xs font-mono font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                    {retiroProduct.sku}
+                  </span>
+                  <h4 className="text-sm font-bold text-slate-900 truncate mt-1">
+                    {retiroProduct.name}
+                  </h4>
+                  <div className="text-xs text-slate-500">{retiroProduct.family}</div>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-[10px] font-bold uppercase text-slate-500">
+                  Disponible Actual
+                </div>
+                <div className="text-lg font-mono font-extrabold text-emerald-700">
+                  {formatInt(retiroCurrentAvail)} u.
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={handleConfirmRetiro} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Retirar desde Almacén *
+                  </label>
+                  <select
+                    value={retiroWhId}
+                    onChange={(e) => {
+                      const newWh = Number(e.target.value);
+                      setRetiroWhId(newWh);
+                      const firstLoc = data.locations.find((l) => l.warehouseId === newWh);
+                      setRetiroLocId(firstLoc?.id || 0);
+                    }}
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white font-semibold"
+                  >
+                    {data.warehouses.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Ubicación / Estante *
+                  </label>
+                  <select
+                    value={retiroLocId}
+                    onChange={(e) => setRetiroLocId(Number(e.target.value))}
+                    className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2.5 bg-white"
+                  >
+                    {data.locations
+                      .filter((l) => l.warehouseId === retiroWhId)
+                      .map((l) => (
+                        <option key={l.id} value={l.id}>
+                          {l.zoneName} · {l.shelfName}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Quantity & Fast Presets */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-slate-700">
+                    Cantidad a Retirar (Unidades enteras) *
+                  </label>
+                  <div className="flex items-center gap-1">
+                    {[100, 500, 1000, 5000].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setRetiroQty(preset)}
+                        className="px-2 py-0.5 text-[11px] font-mono font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-md cursor-pointer"
+                      >
+                        {formatInt(preset)}
+                      </button>
+                    ))}
+                    {retiroCurrentAvail > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setRetiroQty(retiroCurrentAvail)}
+                        className="px-2 py-0.5 text-[11px] font-bold bg-slate-800 text-white rounded-md cursor-pointer"
+                      >
+                        Máx ({formatInt(retiroCurrentAvail)})
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={retiroQty}
+                  onChange={(e) => setRetiroQty(Math.max(1, Math.floor(Number(e.target.value))))}
+                  className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-600"
+                  required
+                />
+                {retiroQty > retiroCurrentAvail && (
+                  <p className="text-red-600 font-semibold mt-1 flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    No puedes retirar {formatInt(retiroQty)} u. porque solo hay{' '}
+                    {formatInt(retiroCurrentAvail)} u. disponibles en este estante.
+                  </p>
+                )}
+              </div>
+
+              {/* Motivo / Destino del Retiro */}
+              <div className="space-y-2">
+                <label className="block font-bold text-slate-700">
+                  Motivo / Destino del Retiro *
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRetiroMode('ORDEN_PRODUCCION')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      retiroMode === 'ORDEN_PRODUCCION'
+                        ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
+                        : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="font-bold text-slate-900">
+                      A) Para una Orden de Producción
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      Retiro de empaques, cases o adaptadores para armar lote
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setRetiroMode('TRANSFERENCIA_ALMACEN')}
+                    className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                      retiroMode === 'TRANSFERENCIA_ALMACEN'
+                        ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
+                        : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="font-bold text-slate-900">
+                      C) Transferencia a otro almacén
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      Envío auditado hacia otra sucursal o taller
+                    </div>
+                  </button>
+
+                  {canAuthorizeSpecialWithdrawal && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setRetiroMode('CONSUMO_OPERATIVO')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          retiroMode === 'CONSUMO_OPERATIVO'
+                            ? 'bg-amber-50 border-amber-500 ring-2 ring-amber-500/20'
+                            : 'bg-white border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="font-bold text-slate-900">
+                          B) Consumo operativo / otro uso
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          Salida autorizada con responsable y motivo
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setRetiroMode('MERMA_DANO')}
+                        className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                          retiroMode === 'MERMA_DANO'
+                            ? 'bg-red-50 border-red-500 ring-2 ring-red-500/20'
+                            : 'bg-white border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="font-bold text-red-900">D) Merma / daño físico</div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          Baja auditada por material defectuoso o roto
+                        </div>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* Conditional Fields by Retiro Mode */}
+              {retiroMode === 'ORDEN_PRODUCCION' && (
+                <div className="p-3.5 bg-sky-50/70 border border-sky-200 rounded-xl space-y-3">
+                  <div>
+                    <label className="block font-bold text-sky-950 mb-1">
+                      Orden de Producción Asociada *
+                    </label>
+                    {openOrders.length === 0 ? (
+                      <div className="p-2.5 bg-white border border-amber-300 rounded-lg text-amber-800 font-medium">
+                        No hay órdenes de producción abiertas. Primero crea una en "Órdenes de
+                        Producción" o elige otro motivo si tienes autorización.
+                      </div>
+                    ) : (
+                      <select
+                        value={retiroOrderId}
+                        onChange={(e) => setRetiroOrderId(Number(e.target.value))}
+                        className="w-full text-sm border border-sky-300 rounded-xl px-3 py-2 bg-white font-semibold text-slate-900"
+                        required
+                      >
+                        <option value={0}>Seleccionar Orden de Producción...</option>
+                        {openOrders.map((o) => {
+                          const sp = data.products.find((p) => p.id === o.strategicProductId);
+                          return (
+                            <option key={o.id} value={o.id}>
+                              {o.orderNumber} — {sp?.name} ({formatInt(o.authorizedQty)} u.)
+                            </option>
+                          );
+                        })}
+                      </select>
+                    )}
+                  </div>
+                  <div>
+                    <label className="block font-bold text-sky-950 mb-1">
+                      Producto / Modelo a armar o justificación *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={retiroTargetUse}
+                      onChange={(e) => setRetiroTargetUse(e.target.value)}
+                      placeholder="Ej. Para armar 1,000 USB HP 8 GB y 1,500 Sony 8 GB"
+                      className="w-full text-sm border border-sky-300 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                  <p className="text-[11px] text-sky-800 leading-relaxed">
+                    <strong>Regla sin doble descuento:</strong> Este insumo se descontará ahora
+                    mismo del estante y quedará vinculado a la orden seleccionada. Al registrar los
+                    productos terminados, no se volverá a descontar.
+                  </p>
+                </div>
+              )}
+
+              {retiroMode === 'TRANSFERENCIA_ALMACEN' && (
+                <div className="p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl space-y-3">
+                  <div>
+                    <label className="block font-bold text-blue-950 mb-1">
+                      Almacén Destino *
+                    </label>
+                    <select
+                      value={retiroDestWhId}
+                      onChange={(e) => setRetiroDestWhId(Number(e.target.value))}
+                      className="w-full text-sm border border-blue-300 rounded-xl px-3 py-2 bg-white font-semibold"
+                    >
+                      {data.allWarehousesSummary
+                        .filter((w) => w.id !== retiroWhId)
+                        .map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-blue-950 mb-1">
+                      Motivo / Referencia de envío *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={retiroReason}
+                      onChange={(e) => setRetiroReason(e.target.value)}
+                      placeholder="Ej. Abastecimiento de empaques a taller"
+                      className="w-full text-sm border border-blue-300 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {(retiroMode === 'CONSUMO_OPERATIVO' || retiroMode === 'MERMA_DANO') && (
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Destinatario / Responsable *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={retiroTargetUse}
+                      onChange={(e) => setRetiroTargetUse(e.target.value)}
+                      placeholder="Nombre del receptor o área"
+                      className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-slate-800 mb-1">
+                      Justificación obligatoria *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={retiroReason}
+                      onChange={(e) => setRetiroReason(e.target.value)}
+                      placeholder="Describa el motivo exacto del retiro"
+                      className="w-full text-sm border border-slate-300 rounded-xl px-3 py-2 bg-white"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Live Mathematical Preview Box */}
+              <div className="p-3.5 bg-amber-50/90 border border-amber-200 rounded-xl grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-[11px] font-medium text-amber-900">
+                    Disponible Anterior
+                  </div>
+                  <div className="text-base font-mono font-bold text-slate-800">
+                    {formatInt(retiroCurrentAvail)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-medium text-amber-900">Cantidad a Retirar</div>
+                  <div className="text-base font-mono font-bold text-amber-700">
+                    -{formatInt(retiroQty > 0 ? retiroQty : 0)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] font-bold text-amber-950">Disponible Restante</div>
+                  <div
+                    className={`text-base font-mono font-extrabold ${
+                      retiroCurrentAvail - retiroQty < 0 ? 'text-red-600' : 'text-emerald-800'
+                    }`}
+                  >
+                    {formatInt(retiroCurrentAvail - (retiroQty > 0 ? retiroQty : 0))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setRetiroProduct(null)}
+                  className="px-4 py-2.5 font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    submitting ||
+                    retiroQty <= 0 ||
+                    retiroQty > retiroCurrentAvail ||
+                    (retiroMode === 'ORDEN_PRODUCCION' && !retiroOrderId)
+                  }
+                  className="px-5 py-2.5 font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 rounded-xl flex items-center gap-1.5 cursor-pointer shadow-sm"
+                >
+                  <Check className="w-4 h-4" />
+                  {submitting ? 'Procesando retiro...' : 'Confirmar Retiro'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 3: COMPROBANTE DE MOVIMIENTO (VOUCHER RECIBO DE OPERACIÓN)      */}
+      {/* ===================================================================== */}
+      {voucherData && (
+        <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.94 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="bg-white rounded-2xl max-w-md w-full overflow-hidden shadow-2xl border border-slate-200"
+          >
+            <div
+              className={`p-5 text-white flex items-center justify-between ${
+                voucherData.operationType === 'INGRESO'
+                  ? 'bg-gradient-to-r from-emerald-700 to-emerald-600'
+                  : 'bg-gradient-to-r from-amber-700 to-amber-600'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <FileCheck2 className="w-7 h-7 text-white shrink-0" />
+                <div>
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-white/80">
+                    Folio Oficial: {voucherData.folio}
+                  </div>
+                  <h3 className="text-sm font-bold leading-snug">
+                    {voucherData.operationTitle}
+                  </h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setVoucherData(null)}
+                className="p-1 text-white/80 hover:text-white cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div className="flex items-center gap-3 pb-3 border-b border-slate-100">
+                {voucherData.productImageUrl && (
+                  <img
+                    src={voucherData.productImageUrl}
+                    alt={voucherData.productName}
+                    className="w-12 h-12 rounded-xl object-cover border border-slate-200 shrink-0"
+                  />
+                )}
+                <div>
+                  <div className="font-mono font-bold text-slate-700">
+                    {voucherData.productSku}
+                  </div>
+                  <div className="text-sm font-bold text-slate-900">
+                    {voucherData.productName}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5 text-slate-600">
+                <div>
+                  <div className="text-[10px] uppercase font-bold text-slate-400">
+                    Fecha y Hora (Servidor)
+                  </div>
+                  <div className="font-mono font-semibold text-slate-900">
+                    {formatBoliviaDateTime(voucherData.serverTimestamp)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase font-bold text-slate-400">
+                    Usuario Responsable
+                  </div>
+                  <div className="font-semibold text-slate-900">{voucherData.userFullName}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Almacén</div>
+                  <div className="font-semibold text-slate-900">{voucherData.warehouseName}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase font-bold text-slate-400">Ubicación</div>
+                  <div className="font-semibold text-slate-900">{voucherData.locationName}</div>
+                </div>
+              </div>
+
+              {voucherData.orderNumber && (
+                <div className="p-2.5 bg-sky-50 border border-sky-200 rounded-xl flex items-center justify-between">
+                  <span className="text-sky-900 font-semibold">Orden de Producción:</span>
+                  <span className="font-mono font-bold text-sky-800">
+                    {voucherData.orderNumber}
+                  </span>
+                </div>
+              )}
+
+              <div className="p-2.5 bg-slate-50 rounded-xl border border-slate-200/80 space-y-1">
+                <div className="text-[10px] uppercase font-bold text-slate-400">
+                  Motivo / Destino
+                </div>
+                <div className="font-semibold text-slate-800">{voucherData.reason}</div>
+                {voucherData.recipientOrTarget && (
+                  <div className="text-slate-600">
+                    Destino/Uso: <strong>{voucherData.recipientOrTarget}</strong>
+                  </div>
+                )}
+              </div>
+
+              {/* Before / Change / After Box */}
+              <div className="p-3.5 bg-slate-900 text-white rounded-xl grid grid-cols-3 gap-2 text-center">
+                <div>
+                  <div className="text-[10px] text-slate-400">Stock Anterior</div>
+                  <div className="text-sm font-mono font-bold">
+                    {formatInt(voucherData.stockBefore)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-400">
+                    {voucherData.operationType === 'INGRESO' ? 'Ingreso' : 'Retiro'}
+                  </div>
+                  <div
+                    className={`text-sm font-mono font-bold ${
+                      voucherData.operationType === 'INGRESO'
+                        ? 'text-emerald-400'
+                        : 'text-amber-400'
+                    }`}
+                  >
+                    {voucherData.operationType === 'INGRESO' ? '+' : '-'}
+                    {formatInt(voucherData.quantityChanged)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-300 font-bold">Stock Resultante</div>
+                  <div className="text-sm font-mono font-extrabold text-white">
+                    {formatInt(voucherData.stockAfter)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end">
+                <button
+                  onClick={() => setVoucherData(null)}
+                  className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-xl cursor-pointer"
+                >
+                  Entendido y Cerrar Comprobante
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 4: DETALLE COMPLETO DEL PRODUCTO POR ALMACÉN Y ESTADO           */}
+      {/* ===================================================================== */}
+      {detailProduct && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 space-y-5 shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center gap-3">
+                <img
+                  src={detailProduct.imageUrl}
+                  alt={detailProduct.name}
+                  className="w-12 h-12 rounded-xl object-cover border border-slate-200"
+                />
+                <div>
+                  <span className="font-mono text-xs font-bold text-blue-700">
+                    {detailProduct.sku}
+                  </span>
+                  <h3 className="text-base font-bold text-slate-900">{detailProduct.name}</h3>
+                </div>
+              </div>
+              <button
+                onClick={() => setDetailProduct(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div className="text-slate-500">Categoría</div>
+                <div className="font-bold text-slate-900 mt-0.5">{detailProduct.family}</div>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div className="text-slate-500">Marca / Modelo</div>
+                <div className="font-bold text-slate-900 mt-0.5">
+                  {detailProduct.brand} · {detailProduct.model}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div className="text-slate-500">Capacidad</div>
+                <div className="font-mono font-bold text-slate-900 mt-0.5">
+                  {detailProduct.capacity || 'N/A'}
+                </div>
+              </div>
+              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                <div className="text-slate-500">Unidad de Medida</div>
+                <div className="font-bold text-slate-900 mt-0.5">{detailProduct.unitName}</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Desglose de Existencias por Almacén, Ubicación y Estado
+              </h4>
+              {(() => {
+                const bals = data.balances.filter((b) => b.productId === detailProduct.id);
+                if (bals.length === 0) {
+                  return (
+                    <div className="p-6 text-center text-xs text-slate-400 bg-slate-50 rounded-xl border border-slate-200">
+                      Este producto tiene 0 unidades registradas en todos los almacenes.
+                    </div>
+                  );
+                }
+                return (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold">
+                        <tr>
+                          <th className="py-2.5 px-3">Almacén</th>
+                          <th className="py-2.5 px-3">Ubicación</th>
+                          <th className="py-2.5 px-3">Estado Contable</th>
+                          <th className="py-2.5 px-3 text-right">Cantidad</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {bals.map((b) => {
+                          const wh = data.warehouses.find((w) => w.id === b.warehouseId);
+                          const loc = data.locations.find((l) => l.id === b.locationId);
+                          const ord =
+                            b.productionOrderId > 0
+                              ? data.productionOrders.find((o) => o.id === b.productionOrderId)
+                              : null;
+                          return (
+                            <tr key={b.id}>
+                              <td className="py-2.5 px-3 font-semibold text-slate-900">
+                                {wh?.name || `#${b.warehouseId}`}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-600">
+                                {loc ? `${loc.zoneName} · ${loc.shelfName}` : 'Principal'}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span className="font-semibold text-slate-800">
+                                  {translateStatus(b.status)}
+                                </span>
+                                {ord && (
+                                  <span className="ml-1.5 font-mono text-[11px] text-sky-700 bg-sky-50 px-1.5 py-0.5 rounded">
+                                    {ord.orderNumber}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900">
+                                {formatInt(b.quantity)} u.
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-3 border-t border-slate-200">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    const p = detailProduct;
+                    setDetailProduct(null);
+                    openIngresarModal(p);
+                  }}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowDownToLine className="w-3.5 h-3.5" />
+                  Ingresar Stock
+                </button>
+                <button
+                  onClick={() => {
+                    const p = detailProduct;
+                    setDetailProduct(null);
+                    openRetirarModal(p);
+                  }}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 cursor-pointer"
+                >
+                  <ArrowUpFromLine className="w-3.5 h-3.5" />
+                  Retirar Stock
+                </button>
+              </div>
+              <button
+                onClick={() => setDetailProduct(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl cursor-pointer"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* MODAL 5: CREAR / EDITAR PRODUCTO                                      */}
       {/* ===================================================================== */}
       {productModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-lg w-full p-6 space-y-5 shadow-xl">
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl my-8">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <h3 className="text-base font-bold text-slate-900">
-                {editingProduct ? 'Editar Producto' : 'Crear Nuevo Producto'}
+                {editingProduct ? 'Editar Ficha de Producto' : 'Nuevo Producto en Catálogo'}
               </h3>
               <button
-                type="button"
                 onClick={() => setProductModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-700"
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1295,105 +3103,153 @@ export function CatalogAndStockView({
             <form onSubmit={handleSaveProduct} className="space-y-4 text-xs">
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
-                  1. SKU / Código del Producto *
+                  1. Código / SKU del Producto *
                 </label>
                 <input
                   type="text"
                   value={prodSku}
-                  onChange={(e) => setProdSku(e.target.value.toUpperCase())}
-                  placeholder="Ej. UDP-8GB, CASE-HP-METAL, EMP-HP-8G"
-                  className="w-full text-sm font-mono border border-slate-300 rounded-lg px-3 py-2.5"
+                  onChange={(e) => setProdSku(e.target.value)}
+                  placeholder="Ej. UDP-8GB, CASE-HP-METAL, USB-HP-8GB"
+                  className="w-full text-sm font-mono border border-slate-300 rounded-lg px-3 py-2"
                   required
                 />
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
-                  2. Descripción del Producto *
+                  2. Nombre / Descripción del Producto *
                 </label>
                 <input
                   type="text"
                   value={prodDescription}
                   onChange={(e) => setProdDescription(e.target.value)}
-                  placeholder="Ej. Case Metálico HP 8GB / Empaque Blíster HP 8GB"
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5"
+                  placeholder="Ej. Chip UDP 8 GB, Case Metálico HP, USB HP 8 GB Terminado"
+                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
                   required
                 />
               </div>
 
-              <div>
-                <label className="block font-semibold text-slate-800 mb-1">
-                  3. Clasificación / Departamento *
-                </label>
-                {data.categories.length > 0 ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1">
+                    3. Categoría / Departamento *
+                  </label>
                   <select
                     value={prodCategoryName}
                     onChange={(e) => setProdCategoryName(e.target.value)}
-                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white font-medium"
                   >
-                    {data.categories.map((cat) => (
-                      <option key={cat.id} value={cat.name}>
-                        {cat.name}
+                    {data.categories.length === 0 && (
+                      <>
+                        <option value="Chips UDP">Chips UDP</option>
+                        <option value="Memorias microSD">Memorias microSD</option>
+                        <option value="Empaques">Empaques</option>
+                        <option value="Cases">Cases</option>
+                        <option value="Adaptadores">Adaptadores</option>
+                        <option value="Producto Terminado">Producto Terminado</option>
+                      </>
+                    )}
+                    {data.categories.map((c) => (
+                      <option key={c.id} value={c.name}>
+                        {c.name}
                       </option>
                     ))}
                   </select>
-                ) : (
-                  <input
-                    type="text"
-                    value={prodCategoryName}
-                    onChange={(e) => setProdCategoryName(e.target.value)}
-                    placeholder="Escribe el departamento (ej. Empaques, Cases...)"
-                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2.5"
-                    required
-                  />
-                )}
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1">
+                    4. Capacidad (si aplica)
+                  </label>
+                  <select
+                    value={prodCapacity}
+                    onChange={(e) => setProdCapacity(e.target.value)}
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white font-mono"
+                  >
+                    <option value="N/A">N/A (No aplica)</option>
+                    <option value="4 GB">4 GB</option>
+                    <option value="8 GB">8 GB</option>
+                    <option value="16 GB">16 GB</option>
+                    <option value="32 GB">32 GB</option>
+                    <option value="64 GB">64 GB</option>
+                    <option value="128 GB">128 GB</option>
+                    <option value="256 GB">256 GB</option>
+                  </select>
+                </div>
               </div>
 
-              {/* Initial Quantity only when creating a new product */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1">
+                    Marca (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={prodBrand}
+                    onChange={(e) => setProdBrand(e.target.value)}
+                    placeholder="Ej. HP, Sony, Samsung, Kingston"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-800 mb-1">
+                    Modelo / Variante (Opcional)
+                  </label>
+                  <input
+                    type="text"
+                    value={prodModel}
+                    onChange={(e) => setProdModel(e.target.value)}
+                    placeholder="Ej. Metálico, Giro, Blíster Azul"
+                    className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
+                  />
+                </div>
+              </div>
+
               {!editingProduct && (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 bg-slate-50 rounded-lg border border-slate-200">
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-3">
                   <div>
                     <label className="block font-semibold text-slate-800 mb-1">
-                      4. Cantidad Inicial (Opcional)
+                      5. Cantidad Inicial en Stock (Opcional)
                     </label>
                     <input
                       type="number"
                       min={0}
-                      step={1}
                       value={prodInitialQty}
                       onChange={(e) =>
-                        setProdInitialQty(Math.max(0, parseInt(e.target.value || '0', 10)))
+                        setProdInitialQty(Math.max(0, Math.floor(Number(e.target.value))))
                       }
                       className="w-full text-sm font-mono font-bold border border-slate-300 rounded-lg px-3 py-2 bg-white"
                     />
                   </div>
-                  <div>
-                    <label className="block font-semibold text-slate-800 mb-1">
-                      Almacén donde se encuentra
-                    </label>
-                    <select
-                      value={prodInitialWhId}
-                      onChange={(e) => setProdInitialWhId(Number(e.target.value))}
-                      className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white"
-                    >
-                      {data.warehouses.map((w) => (
-                        <option key={w.id} value={w.id}>
-                          {w.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  {prodInitialQty > 0 && (
+                    <div>
+                      <label className="block font-medium text-slate-700 mb-1">
+                        ¿En qué almacén se encuentra esta cantidad?
+                      </label>
+                      <select
+                        value={prodInitialWhId}
+                        onChange={(e) => setProdInitialWhId(Number(e.target.value))}
+                        className="w-full text-xs border border-slate-300 rounded-lg px-2.5 py-2 bg-white"
+                      >
+                        {data.warehouses.map((w) => (
+                          <option key={w.id} value={w.id}>
+                            {w.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
 
               <div>
-                <label className="block font-semibold text-slate-800 mb-1.5">
-                  {editingProduct ? '4. Fotografía del Producto' : '5. Fotografía del Producto'}
+                <label className="block font-semibold text-slate-800 mb-1">
+                  Fotografía del Producto
                 </label>
-                <div className="flex items-center gap-4">
-                  <label className="px-4 py-2.5 text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg cursor-pointer flex items-center gap-2 border border-slate-300">
-                    <Camera className="w-4 h-4" />
-                    Subir Foto o Tomar con Cámara
+                <div className="flex items-center gap-3">
+                  <label className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg cursor-pointer font-medium flex items-center gap-2 border border-slate-300">
+                    <Camera className="w-4 h-4 text-slate-600" />
+                    Subir Foto desde Celular / PC
                     <input
                       type="file"
                       accept="image/*"
@@ -1405,172 +3261,27 @@ export function CatalogAndStockView({
                     <img
                       src={prodImageUrl}
                       alt="Vista previa"
-                      className="w-20 h-14 object-cover rounded-lg border border-slate-300"
+                      className="w-16 h-12 object-cover rounded-lg border border-slate-300"
                     />
                   )}
                 </div>
               </div>
-
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200">
-                <button
-                  type="button"
-                  onClick={() => setProductModalOpen(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting || !isOnline}
-                  className="px-5 py-2.5 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg"
-                >
-                  {submitting
-                    ? 'Guardando...'
-                    : editingProduct
-                    ? 'Guardar Cambios'
-                    : 'Crear Producto'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ===================================================================== */}
-      {/* MODAL: INGRESO RÁPIDO DE STOCK PARA UN PRODUCTO                       */}
-      {/* ===================================================================== */}
-      {quickStockProduct && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <div>
-                <span className="text-xs font-mono font-bold text-sky-700">
-                  {quickStockProduct.sku}
-                </span>
-                <h3 className="text-base font-bold text-slate-900">
-                  Ingresar Mercancía: {quickStockProduct.name}
-                </h3>
-              </div>
-              <button
-                onClick={() => setQuickStockProduct(null)}
-                className="p-1 text-slate-400 hover:text-slate-700"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <form onSubmit={handleConfirmQuickStock} className="space-y-4 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-800 mb-1">
-                  Cantidad a Ingresar (Unidades) *
-                </label>
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={quickStockQty}
-                  onChange={(e) =>
-                    setQuickStockQty(Math.max(1, parseInt(e.target.value || '0', 10)))
-                  }
-                  className="w-full text-base font-mono font-bold border border-slate-300 rounded-lg px-3 py-2"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-800 mb-1">
-                  Almacén de Destino *
-                </label>
-                <select
-                  value={quickStockWhId}
-                  onChange={(e) => setQuickStockWhId(Number(e.target.value))}
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2 bg-white"
-                >
-                  {data.warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-800 mb-1">
-                  Proveedor / Referencia (Opcional)
-                </label>
-                <input
-                  type="text"
-                  value={quickStockSupplier}
-                  onChange={(e) => setQuickStockSupplier(e.target.value)}
-                  placeholder="Ej. Contenedor #10 / Compra Local"
-                  className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
-                />
-              </div>
-
-              {canViewCosts && (
-                <div className="pt-2 border-t border-slate-200 space-y-2">
-                  <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={quickIncludeCost}
-                      onChange={(e) => setQuickIncludeCost(e.target.checked)}
-                    />
-                    Agregar Costo Privado de Compra (Solo visible para Administrador)
-                  </label>
-                  {quickIncludeCost && (
-                    <div className="grid grid-cols-3 gap-2 pt-1">
-                      <div>
-                        <label className="block text-[11px] text-slate-500">FOB Total ($)</label>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={quickFobCost}
-                          onChange={(e) => setQuickFobCost(Number(e.target.value))}
-                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] text-slate-500">Flete ($)</label>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={quickFreightCost}
-                          onChange={(e) => setQuickFreightCost(Number(e.target.value))}
-                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] text-slate-500">Póliza ($)</label>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.01"
-                          value={quickCustomsCost}
-                          onChange={(e) => setQuickCustomsCost(Number(e.target.value))}
-                          className="w-full font-mono border border-slate-300 rounded px-2 py-1"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
 
               <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setQuickStockProduct(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
+                  onClick={() => setProductModalOpen(false)}
+                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting || !isOnline}
-                  className="px-5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg"
+                  disabled={submitting}
+                  className="px-5 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg flex items-center gap-1.5 cursor-pointer"
                 >
-                  {submitting ? 'Confirmando...' : 'Confirmar Ingreso'}
+                  <Check className="w-4 h-4" />
+                  {submitting ? 'Guardando...' : 'Guardar Producto'}
                 </button>
               </div>
             </form>
@@ -1579,20 +3290,18 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL: CREAR O EDITAR CLASIFICACIÓN / DEPARTAMENTO                    */}
+      {/* MODAL 6: CREAR / EDITAR CATEGORÍA                                     */}
       {/* ===================================================================== */}
       {catModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 pb-3">
               <h3 className="text-base font-bold text-slate-900">
-                {editingCategory
-                  ? 'Editar Clasificación / Departamento'
-                  : 'Nueva Clasificación / Departamento'}
+                {editingCategory ? 'Editar Categoría' : 'Nueva Categoría / Departamento'}
               </h3>
               <button
                 onClick={() => setCatModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-700"
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -1601,13 +3310,13 @@ export function CatalogAndStockView({
             <form onSubmit={handleSaveCategory} className="space-y-4 text-xs">
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
-                  Nombre de la Clasificación / Departamento *
+                  Nombre de la Categoría *
                 </label>
                 <input
                   type="text"
                   value={catName}
                   onChange={(e) => setCatName(e.target.value)}
-                  placeholder="Ej. Empaques, Cases, Chips UDP, Blísteres..."
+                  placeholder="Ej. Empaques, Cases, Chips UDP, Memorias microSD"
                   className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
                   required
                 />
@@ -1615,40 +3324,41 @@ export function CatalogAndStockView({
 
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
-                  Comportamiento en Producción y Stock *
+                  Comportamiento en Inventario y Producción *
                 </label>
                 <select
                   value={catAccType}
                   onChange={(e) => setCatAccType(e.target.value as any)}
                   className="w-full text-xs border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
                 >
+                  <option value="STRATEGIC_COMPONENT">
+                    Componente Estratégico (Se asigna en Orden de Producción, ej. Chips UDP /
+                    microSD)
+                  </option>
                   <option value="SECONDARY_COMPONENT">
-                    Insumo / Componente de Taller (Ej. Cases, Accesorios)
+                    Insumo de Ensamblaje (Se retira con botón Retirar, ej. Cases / Carcasas)
                   </option>
                   <option value="PACKAGING_KIT">
-                    Empaque / Blíster (Se descuenta al fabricar)
-                  </option>
-                  <option value="STRATEGIC_COMPONENT">
-                    Componente Principal por Orden (Ej. Chips UDP, Memorias microSD)
+                    Empaque / Blíster (Se retira con botón Retirar)
                   </option>
                   <option value="UNIVERSAL_ACCESSORY">
-                    Accesorio Universal (Ej. Adaptador SD)
+                    Accesorio / Adaptador (Ej. Adaptadores SD)
                   </option>
                   <option value="FINISHED_GOOD">
-                    Producto Terminado Final (Ej. USB o microSD empaquetada)
+                    Producto Terminado (Se registra al fabricar lotes)
                   </option>
                 </select>
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-800 mb-1">
-                  Descripción Breve (Opcional)
+                  Descripción (Opcional)
                 </label>
                 <input
                   type="text"
                   value={catDescription}
                   onChange={(e) => setCatDescription(e.target.value)}
-                  placeholder="Descripción del departamento"
+                  placeholder="Ej. Blísteres y cartones por marca"
                   className="w-full text-sm border border-slate-300 rounded-lg px-3 py-2"
                 />
               </div>
@@ -1657,16 +3367,16 @@ export function CatalogAndStockView({
                 <button
                   type="button"
                   onClick={() => setCatModalOpen(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 bg-slate-100 rounded-lg"
+                  className="px-4 py-2 font-semibold text-slate-600 bg-slate-100 rounded-lg cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting || !isOnline}
-                  className="px-5 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg"
+                  disabled={submitting}
+                  className="px-5 py-2 font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg cursor-pointer"
                 >
-                  Guardar Clasificación
+                  Guardar Categoría
                 </button>
               </div>
             </form>
@@ -1675,23 +3385,30 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL: CONFIRMAR ELIMINACIÓN DE PRODUCTO                              */}
+      {/* MODAL 7: CONFIRMACIÓN DE ELIMINACIÓN DE PRODUCTO                      */}
       {/* ===================================================================== */}
       {deleteConfirmProduct && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-4 shadow-xl">
-            <h3 className="text-base font-bold text-slate-900">
-              ¿Eliminar el producto "{deleteConfirmProduct.name}"?
-            </h3>
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl border border-red-200">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">¿Eliminar este producto?</h3>
+                <p className="text-xs text-slate-500 font-mono">{deleteConfirmProduct.sku}</p>
+              </div>
+            </div>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Se eliminará el SKU <strong>{deleteConfirmProduct.sku}</strong> y sus saldos asociados
-              del catálogo.
+              Estás por eliminar permanentemente <strong>{deleteConfirmProduct.name}</strong> y sus
+              registros asociados del catálogo.
             </p>
-            <div className="flex items-center justify-end gap-3 pt-2">
+            <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
                 type="button"
+                disabled={submitting}
                 onClick={() => setDeleteConfirmProduct(null)}
-                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 rounded-lg"
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
               >
                 Cancelar
               </button>
@@ -1699,8 +3416,9 @@ export function CatalogAndStockView({
                 type="button"
                 disabled={submitting}
                 onClick={() => handleDeleteProduct(deleteConfirmProduct)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-lg"
+                className="px-4 py-2 text-xs font-bold text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-xl cursor-pointer flex items-center gap-1.5"
               >
+                <Trash2 className="w-3.5 h-3.5" />
                 {submitting ? 'Eliminando...' : 'Sí, Eliminar Producto'}
               </button>
             </div>
@@ -1709,59 +3427,58 @@ export function CatalogAndStockView({
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL: AMPLIAR FOTOGRAFÍA                                             */}
+      {/* MODAL 8: ZOOM DE FOTOGRAFÍA                                           */}
       {/* ===================================================================== */}
       {zoomPhotoProduct && (
         <div
-          className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
           onClick={() => setZoomPhotoProduct(null)}
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
         >
           <div
-            className="bg-white rounded-xl max-w-lg w-full p-5 space-y-4"
             onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-xl max-w-lg w-full overflow-hidden shadow-2xl"
           >
-            <div className="flex items-center justify-between">
+            <img
+              src={zoomPhotoProduct.imageUrl}
+              alt={zoomPhotoProduct.name}
+              className="w-full h-72 object-cover bg-slate-900"
+            />
+            <div className="p-4 flex items-center justify-between">
               <div>
                 <span className="font-mono text-xs font-bold text-sky-700">
-                  SKU: {zoomPhotoProduct.sku} · {zoomPhotoProduct.family}
+                  {zoomPhotoProduct.sku} · {zoomPhotoProduct.family}
                 </span>
                 <h3 className="text-base font-bold text-slate-900">{zoomPhotoProduct.name}</h3>
               </div>
               <button
                 onClick={() => setZoomPhotoProduct(null)}
-                className="p-1 text-slate-500 hover:text-slate-900"
+                className="px-4 py-2 text-xs font-semibold bg-slate-900 text-white rounded-lg cursor-pointer"
               >
-                <X className="w-5 h-5" />
+                Cerrar
               </button>
             </div>
-            <img
-              src={zoomPhotoProduct.imageUrl}
-              alt={zoomPhotoProduct.name}
-              referrerPolicy="no-referrer"
-              className="w-full h-72 object-contain bg-slate-950 rounded-lg border border-slate-200"
-            />
           </div>
         </div>
       )}
 
       {/* ===================================================================== */}
-      {/* MODAL ESTILO IPHONE: DESLIZAR PARA CONFIRMAR ELIMINACIÓN DE ALMACÉN   */}
+      {/* MODAL 9: DESLIZAR PARA ELIMINAR ALMACÉN (ESTILO IPHONE)               */}
       {/* ===================================================================== */}
       {warehouseToDelete && (
         <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl border border-red-200">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-3">
-                <div className="w-11 h-11 rounded-2xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                <div className="w-11 h-11 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
                   <AlertTriangle className="w-6 h-6" />
                 </div>
                 <div>
-                  <span className="text-[11px] font-bold uppercase tracking-wider text-red-600">
-                    Confirmación de Seguridad
-                  </span>
-                  <h3 className="text-lg font-bold text-slate-900 leading-tight">
-                    Eliminar Almacén "{warehouseToDelete.name}"
+                  <h3 className="text-base font-bold text-slate-900">
+                    Confirmar Eliminación de Almacén
                   </h3>
+                  <p className="text-xs text-red-600 font-semibold">
+                    Acción crítica e irreversible
+                  </p>
                 </div>
               </div>
               <button
@@ -1771,70 +3488,56 @@ export function CatalogAndStockView({
                   setWarehouseToDelete(null);
                   setSlideProgress(0);
                 }}
-                className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {(() => {
-              const totalUnits = data.balances
-                .filter((b) => b.warehouseId === warehouseToDelete.id)
-                .reduce((acc, b) => acc + b.quantity, 0);
-              const totalLocs = data.locations.filter(
-                (l) => l.warehouseId === warehouseToDelete.id
-              ).length;
+            <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-2 text-xs text-red-950">
+              <div className="font-bold text-sm text-red-900">
+                Almacén: {warehouseToDelete.name} ({warehouseToDelete.code})
+              </div>
+              <p className="leading-relaxed text-red-800">
+                Al confirmar, se eliminará todo el almacén junto con sus estantes y las existencias
+                almacenadas allí (
+                <strong>
+                  {formatInt(
+                    data.balances
+                      .filter((b) => b.warehouseId === warehouseToDelete.id)
+                      .reduce((acc, b) => acc + b.quantity, 0)
+                  )}{' '}
+                  unidades actuales
+                </strong>
+                ).
+              </p>
+            </div>
 
-              return (
-                <div className="p-4 rounded-xl bg-red-50 border border-red-200 space-y-2 text-xs text-red-950">
-                  <p className="font-bold text-red-800">
-                    ⚠️ Atención: Esta acción es irreversible
-                  </p>
-                  <p className="leading-relaxed text-red-900/90">
-                    Al eliminar el almacén <strong>{warehouseToDelete.name}</strong> ({warehouseToDelete.code}), se borrarán sus{' '}
-                    <strong>{totalLocs} secciones/estantes</strong> y se perderán las{' '}
-                    <strong>{formatInt(totalUnits)} unidades de productos</strong> registradas en él.
-                  </p>
-                </div>
-              );
-            })()}
-
-            {/* iPhone-style Slide to Unlock / Confirm Track */}
+            {/* iPhone-style Slide to Confirm Track */}
             <div className="space-y-2 pt-1">
-              <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500 text-center">
-                Desliza el botón rojo hasta el final para confirmar
-              </label>
-
-              <div className="relative h-14 w-full rounded-full bg-slate-900 border-2 border-red-500/40 p-1.5 overflow-hidden select-none shadow-inner">
-                {/* Red fill behind thumb */}
+              <div className="relative h-14 bg-slate-900 rounded-full p-1.5 overflow-hidden select-none shadow-inner border border-slate-800">
                 <div
                   className="absolute inset-y-0 left-0 bg-gradient-to-r from-red-700 to-red-600 transition-all duration-75"
-                  style={{ width: `${Math.max(slideProgress, 12)}%`, opacity: 0.45 }}
+                  style={{ width: `${Math.max(14, slideProgress)}%` }}
                 />
 
-                {/* Center instruction text */}
-                <div className="relative z-10 h-full flex items-center justify-center pointer-events-none px-12">
-                  <span
-                    className="text-xs font-bold tracking-wide text-white transition-opacity"
-                    style={{ opacity: Math.max(0.15, 1 - slideProgress / 75) }}
-                  >
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none px-12">
+                  <span className="text-xs font-bold tracking-wide text-white/90 uppercase">
                     {deletingWarehouse
                       ? 'Eliminando almacén...'
-                      : 'Deslizar para eliminar almacén →'}
+                      : 'Deslizar para eliminar almacén'}
                   </span>
                 </div>
 
-                {/* Visual Draggable Thumb */}
                 <div
-                  className="absolute top-1.5 bottom-1.5 w-11 rounded-full bg-red-600 text-white shadow-lg flex items-center justify-center pointer-events-none transition-all duration-75"
+                  className="relative z-10 w-11 h-11 rounded-full bg-white shadow-lg flex items-center justify-center text-red-600 pointer-events-none transition-transform duration-75"
                   style={{
-                    left: `calc(6px + (100% - 56px) * ${slideProgress / 100})`,
+                    transform: `translateX(calc(${slideProgress} * (100cqw - 3.25rem) / 100))`,
                   }}
                 >
-                  <ChevronsRight className="w-5 h-5" />
+                  <ChevronsRight className="w-6 h-6" />
                 </div>
 
-                {/* Native Touch/Mouse Range Input Overlay */}
                 <input
                   type="range"
                   min={0}
@@ -1842,16 +3545,19 @@ export function CatalogAndStockView({
                   value={slideProgress}
                   disabled={deletingWarehouse}
                   onChange={(e) => handleSlideChange(Number(e.target.value))}
-                  onTouchEnd={handleSlideRelease}
                   onMouseUp={handleSlideRelease}
-                  onKeyUp={handleSlideRelease}
-                  aria-label="Deslizar para confirmar eliminación de almacén"
-                  className="absolute inset-0 w-full h-full opacity-0 cursor-grab active:cursor-grabbing z-20"
+                  onTouchEnd={handleSlideRelease}
+                  aria-label="Deslizar para confirmar eliminación del almacén"
+                  className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize z-20"
+                  style={{ containerType: 'inline-size' }}
                 />
               </div>
+              <p className="text-[11px] text-center text-slate-500">
+                Arrastra el control hasta el extremo derecho para confirmar la eliminación.
+              </p>
             </div>
 
-            <div className="flex justify-end pt-2">
+            <div className="flex justify-end pt-2 border-t border-slate-100">
               <button
                 type="button"
                 disabled={deletingWarehouse}
@@ -1859,7 +3565,7 @@ export function CatalogAndStockView({
                   setWarehouseToDelete(null);
                   setSlideProgress(0);
                 }}
-                className="w-full py-2.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl cursor-pointer"
+                className="px-4 py-2 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer"
               >
                 Cancelar y Conservar Almacén
               </button>
