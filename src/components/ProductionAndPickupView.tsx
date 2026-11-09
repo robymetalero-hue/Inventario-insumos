@@ -202,7 +202,7 @@ export function ProductionAndPickupView({
     setOpSourceWhId(defOriginWh);
     setOpTargetWhId(defTargetWh);
     setOpAssignedUserId(data.user.id);
-    setOpAuthorizedQty(Math.min(1000, Math.max(100, pred.topLocationAvail || 1000)));
+    setOpAuthorizedQty(0);
     setOpInstructions('');
     setOrderModalOpen(true);
   };
@@ -328,7 +328,7 @@ export function ProductionAndPickupView({
 
     setAssignPackOrder(order);
     setAssignPackProductId(defaultPack?.id || 0);
-    setAssignPackQty(Math.min(500, Math.max(100, custodyLeft || 500)));
+    setAssignPackQty(0);
     setAssignPackTargetModel(
       defaultPack
         ? suggestFinishedNameFromPackaging(defaultPack.name, stratProd?.name)
@@ -410,8 +410,8 @@ export function ProductionAndPickupView({
         discountPackagingFromStock: orderWithdrawDocs.length === 0 && Boolean(firstPack),
         finishedProductId: finishedProducts[0]?.id || 0,
         finishedModelName: suggestedModel,
-        quantityProduced: defaultQty,
-        strategicQtyConsumed: defaultQty,
+        quantityProduced: 0,
+        strategicQtyConsumed: 0,
         notes: '',
       },
     ]);
@@ -870,19 +870,25 @@ export function ProductionAndPickupView({
                         </div>
                         <div className="flex items-center gap-2">
                           <input
-                            type="number"
-                            min={0}
-                            max={d.dispatchedQty}
-                            value={ackInputs[d.id]?.qty ?? d.dispatchedQty}
-                            onChange={(e) =>
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            placeholder="Cantidad"
+                            value={
+                              (ackInputs[d.id]?.qty ?? d.dispatchedQty) > 0
+                                ? String(ackInputs[d.id]?.qty ?? d.dispatchedQty)
+                                : ''
+                            }
+                            onChange={(e) => {
+                              const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
                               setAckInputs({
                                 ...ackInputs,
                                 [d.id]: {
-                                  qty: Number(e.target.value),
+                                  qty: digits ? Math.min(d.dispatchedQty, Number(digits)) : 0,
                                   notes: ackInputs[d.id]?.notes || '',
                                 },
-                              })
-                            }
+                              });
+                            }}
                             className="w-28 font-mono font-bold text-sm border border-amber-400 rounded-xl px-3 py-2 bg-white"
                           />
                           <button
@@ -1162,24 +1168,23 @@ export function ProductionAndPickupView({
                       </div>
                       <div className="flex items-center gap-2">
                         <input
-                          type="number"
-                          min={1}
-                          max={bal.quantity}
-                          value={inputQty}
-                          onChange={(e) =>
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
+                          placeholder="Cantidad"
+                          value={inputQty > 0 ? String(inputQty) : ''}
+                          onChange={(e) => {
+                            const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
                             setFgDispatchQtyMap({
                               ...fgDispatchQtyMap,
-                              [key]: Math.max(
-                                1,
-                                Math.min(bal.quantity, Math.floor(Number(e.target.value)))
-                              ),
-                            })
-                          }
+                              [key]: digits ? Math.min(bal.quantity, Number(digits)) : 0,
+                            });
+                          }}
                           className="w-28 text-xs font-mono font-bold border border-slate-300 rounded-xl px-3 py-2"
                         />
                         <button
                           type="button"
-                          disabled={submitting}
+                          disabled={submitting || inputQty <= 0}
                           onClick={() =>
                             handleDispatchFinished(
                               bal.productionOrderId,
@@ -1355,13 +1360,16 @@ export function ProductionAndPickupView({
                   </div>
                 </div>
                 <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={opAuthorizedQty}
-                  onChange={(e) =>
-                    setOpAuthorizedQty(Math.max(1, Math.floor(Number(e.target.value))))
-                  }
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoFocus
+                  placeholder="Escribe la cantidad (ej. 1000)"
+                  value={opAuthorizedQty > 0 ? String(opAuthorizedQty) : ''}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                    setOpAuthorizedQty(digits ? Number(digits) : 0);
+                  }}
                   className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2"
                   required
                 />
@@ -1507,13 +1515,16 @@ export function ProductionAndPickupView({
                         </div>
                       </div>
                       <input
-                        type="number"
-                        min={1}
-                        max={packSource.totalAvail || undefined}
-                        value={assignPackQty}
-                        onChange={(e) =>
-                          setAssignPackQty(Math.max(1, Math.floor(Number(e.target.value))))
-                        }
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        autoFocus
+                        placeholder="Escribe la cantidad a retirar"
+                        value={assignPackQty > 0 ? String(assignPackQty) : ''}
+                        onChange={(e) => {
+                          const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                          setAssignPackQty(digits ? Number(digits) : 0);
+                        }}
                         className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2"
                         required
                       />
@@ -1736,12 +1747,14 @@ export function ProductionAndPickupView({
                                   </div>
                                 </div>
                                 <input
-                                  type="number"
-                                  min={1}
-                                  max={custodyLeft}
-                                  value={line.quantityProduced}
+                                  type="text"
+                                  inputMode="numeric"
+                                  pattern="[0-9]*"
+                                  placeholder="Cantidad"
+                                  value={line.quantityProduced > 0 ? String(line.quantityProduced) : ''}
                                   onChange={(e) => {
-                                    const val = Math.max(1, Math.floor(Number(e.target.value)));
+                                    const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                                    const val = digits ? Number(digits) : 0;
                                     const copy = [...batchLines];
                                     copy[idx].quantityProduced = val;
                                     copy[idx].strategicQtyConsumed = val;
@@ -1906,15 +1919,15 @@ export function ProductionAndPickupView({
                         Cantidad (Máx. en custodia: {formatInt(custodyLeft)} u.) *
                       </label>
                       <input
-                        type="number"
-                        min={1}
-                        max={custodyLeft}
-                        value={returnQty}
-                        onChange={(e) =>
-                          setReturnQty(
-                            Math.max(1, Math.min(custodyLeft, Math.floor(Number(e.target.value))))
-                          )
-                        }
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        placeholder="Cantidad"
+                        value={returnQty > 0 ? String(returnQty) : ''}
+                        onChange={(e) => {
+                          const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                          setReturnQty(digits ? Math.min(custodyLeft, Number(digits)) : 0);
+                        }}
                         className="w-full text-lg font-mono font-bold border border-slate-300 rounded-xl px-3 py-2"
                         required
                       />

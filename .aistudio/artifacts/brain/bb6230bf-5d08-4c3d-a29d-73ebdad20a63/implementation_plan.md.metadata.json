@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan para habilitar el acceso directo en celular/PC como Aplicación Web Instalable (PWA), corregir el ruteo de producción en Cloud Run para evitar errores 404 y mantener el login normal con admin / 1234.",
-  "updatedAt":  "2026-11-08T23:29:28.261847088Z",
+  "summary":  "Plan para unificar el descuento de chips + empaques/blíster/case/adaptador en un solo paso al reportar o recoger productos terminados, crear el Registro de Productos Terminados con trazabilidad de insumos y operario, y asegurar teclado numérico limpio en el 100 % de los campos de cantidad.",
+  "updatedAt":  "2026-11-09T09:03:37.432158938Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

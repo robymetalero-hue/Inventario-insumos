@@ -131,7 +131,7 @@ export function CatalogAndStockView({
   const [ingresoProduct, setIngresoProduct] = useState<Product | null>(null);
   const [ingresoWhId, setIngresoWhId] = useState<number>(data.warehouses[0]?.id || 0);
   const [ingresoLocId, setIngresoLocId] = useState<number>(0);
-  const [ingresoQty, setIngresoQty] = useState<number>(1000);
+  const [ingresoQty, setIngresoQty] = useState<number>(0);
   const [ingresoMovementType, setIngresoMovementType] = useState<
     'INGRESO_PROVEEDOR' | 'DEVOLUCION_INSUMOS' | 'REGULARIZACION_AUTORIZADA'
   >('INGRESO_PROVEEDOR');
@@ -148,7 +148,7 @@ export function CatalogAndStockView({
   const [retiroProduct, setRetiroProduct] = useState<Product | null>(null);
   const [retiroWhId, setRetiroWhId] = useState<number>(data.warehouses[0]?.id || 0);
   const [retiroLocId, setRetiroLocId] = useState<number>(0);
-  const [retiroQty, setRetiroQty] = useState<number>(500);
+  const [retiroQty, setRetiroQty] = useState<number>(0);
   const [retiroMode, setRetiroMode] = useState<
     'ORDEN_PRODUCCION' | 'CONSUMO_OPERATIVO' | 'TRANSFERENCIA_ALMACEN' | 'MERMA_DANO'
   >('ORDEN_PRODUCCION');
@@ -222,7 +222,7 @@ export function CatalogAndStockView({
     setIngresoProduct(prod);
     setIngresoWhId(whId);
     setIngresoLocId(locId);
-    setIngresoQty(1000);
+    setIngresoQty(0);
     setIngresoMovementType('INGRESO_PROVEEDOR');
     setIngresoSupplier('');
     setIngresoNotes('');
@@ -247,21 +247,10 @@ export function CatalogAndStockView({
           data.locations[0]?.id ||
           0;
 
-    const currentAvail =
-      data.balances
-        .filter(
-          (b) =>
-            b.productId === prod.id &&
-            b.warehouseId === whId &&
-            b.locationId === locId &&
-            b.status === 'AVAILABLE'
-        )
-        .reduce((s, b) => s + b.quantity, 0) || 0;
-
     setRetiroProduct(prod);
     setRetiroWhId(whId);
     setRetiroLocId(locId);
-    setRetiroQty(currentAvail > 0 ? Math.min(500, currentAvail) : 100);
+    setRetiroQty(0);
     setRetiroMode('CONSUMO_OPERATIVO');
     setRetiroOrderId(0);
     setRetiroTargetUse('');
@@ -2286,11 +2275,16 @@ export function CatalogAndStockView({
                   </div>
                 </div>
                 <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={ingresoQty}
-                  onChange={(e) => setIngresoQty(Math.max(1, Math.floor(Number(e.target.value))))}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoFocus
+                  placeholder="Escribe la cantidad (ej. 1000)"
+                  value={ingresoQty > 0 ? String(ingresoQty) : ''}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                    setIngresoQty(digits ? Number(digits) : 0);
+                  }}
                   className="w-full text-xl font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-emerald-600"
                   required
                 />
@@ -2476,11 +2470,16 @@ export function CatalogAndStockView({
                   </div>
                 </div>
                 <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  value={retiroQty}
-                  onChange={(e) => setRetiroQty(Math.max(1, Math.floor(Number(e.target.value))))}
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoFocus
+                  placeholder="Escribe la cantidad a retirar"
+                  value={retiroQty > 0 ? String(retiroQty) : ''}
+                  onChange={(e) => {
+                    const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                    setRetiroQty(digits ? Number(digits) : 0);
+                  }}
                   className="w-full text-xl font-mono font-bold border border-slate-300 rounded-xl px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-amber-600"
                   required
                 />
@@ -2967,12 +2966,15 @@ export function CatalogAndStockView({
                       5. Cantidad Inicial en Stock (Opcional)
                     </label>
                     <input
-                      type="number"
-                      min={0}
-                      value={prodInitialQty}
-                      onChange={(e) =>
-                        setProdInitialQty(Math.max(0, Math.floor(Number(e.target.value))))
-                      }
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      placeholder="Ej. 5000 (dejar vacío si inicia en 0)"
+                      value={prodInitialQty > 0 ? String(prodInitialQty) : ''}
+                      onChange={(e) => {
+                        const digits = e.target.value.replace(/\D/g, '').replace(/^0+/, '');
+                        setProdInitialQty(digits ? Number(digits) : 0);
+                      }}
                       className="w-full text-sm font-mono font-bold border border-slate-300 rounded-lg px-3 py-2 bg-white"
                     />
                   </div>

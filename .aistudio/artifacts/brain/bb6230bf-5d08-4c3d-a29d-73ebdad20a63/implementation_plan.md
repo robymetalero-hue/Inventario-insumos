@@ -1,80 +1,121 @@
-# Acceso en Celular / PC (PWA Instalable) y Despliegue sin Error 404 — ControlStock Pro
+# Flujo Unificado de Descuento de Insumos en Producción, Registro de Productos Terminados y Teclado Numérico Global
 
-Este plan soluciona el error 404 al abrir el enlace en dispositivos móviles o externos, blinda el servidor para entornos de producción en Cloud Run y convierte **ControlStock Pro** en una **Aplicación Web Instalable (PWA)** en celulares Android, iOS y computadoras, conservando la pantalla de acceso con usuario y contraseña (`admin` / `1234`).
+Este plan simplifica el control de producción e inventario para que, al entregar chips (ej. 5.000 UDP 8 GB) al personal y luego reportar o recoger los productos terminados, se descuenten **en un solo paso** todos los insumos utilizados (chips + empaque/blíster + case/carcasa + adaptador), se sumen los productos terminados al stock disponible y quede un **Registro de Productos Terminados** claro con fecha, cantidad, marca, modelo, color, capacidad, insumos descontados y operario responsable.
 
-## User Review & Critical Decisions
+---
+
+### User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Decisiones confirmadas para el acceso web y móvil:
+> Estas decisiones recogen exactamente tus respuestas de confirmación y las reglas de simplicidad solicitadas:
 
-- **Aplicación Instalable en Celular y PC (Confirmado)**: Se integrará soporte completo de **PWA (Progressive Web App)** con manifiesto web, iconos de alta resolución (192x192, 512x512 y maskable) y un botón directo **"Instalar App en Celular / PC"** tanto en la pantalla de login como en la barra lateral.
-- **Pantalla de Login Estándar (Confirmado)**: Se mantiene la pantalla normal de usuario y contraseña (donde el administrador ingresa con `admin` y `1234`).
-- **Solución Definitiva al Error 404 en Enlaces Externos**:
-  1. **En el servidor**: Se ajustará el arranque de producción para compilar y servir siempre los activos estáticos (`dist/`) cuando exista el build o hacer fallback automático sin caer en rutas 404, usando `"start": "node server.ts"` conforme al estándar de Cloud Run.
-  2. **Guía de enlace activo y código QR dentro de la app**: Se añadirá un modal de **"Compartir / Abrir en Celular"** dentro del panel para que puedas escanear o copiar el enlace público activo tras pulsar **Share / Deploy** en la barra superior de AI Studio.
-
----
-
-## 1. Overview & Core Concept
-
-- **What It Does**: Permite que cualquier encargado o administrador abra **ControlStock Pro** desde el navegador o la instale como aplicación nativa en su teléfono Android, iPhone o PC, conectándose en tiempo real a la base de datos PostgreSQL de producción.
-- **Target Audience / Persona**: Propietario (`admin` / `1234`) y encargados de almacén/producción que operan desde celulares en Sencata, Villa Dolores y Puente Bolivia.
-- **Key Value**: Acceso rápido desde un ícono en la pantalla de inicio del teléfono sin barras del navegador (`display: standalone`), con verificación estricta de conexión en línea para proteger el inventario.
+- **Decisión Confirmada 1 — Descuento Unificado al Reportar / Recoger Productos Terminados**: Los chips se entregan en la orden de producción (ej. 5.000 chips UDP 8 GB) con su nota/justificación de entrada a producción. Al momento de reportar o recoger los productos terminados de la orden, el usuario marca en una sola ventana qué insumos acompañaron a los chips (**Empaque/Blíster**, **Case/Carcasa** y/o **Adaptador**) y el sistema descuenta todos esos insumos junto con los chips en una sola operación.
+- **Decisión Confirmada 2 — Destino al Recoger Productos Terminados**: Los productos terminados recogidos **se suman automáticamente al stock disponible** del almacén destino y, al mismo tiempo, quedan guardados en la vista de **Registro de Productos Terminados**.
+- **Decisión Confirmada 3 — Datos en la Tabla de Registro de Productos Terminados**: Cada registro mostrará de forma directa y sin redundancia: **Fecha y Hora**, **Cantidad producida/recogida**, **Producto Terminado (Marca, Modelo, Capacidad y Color)**, **Resumen de insumos descontados (chips + empaque + case/adaptador)** y **Nombre del operario que entregó los terminados**.
+- **Decisión Confirmada 4 — Teclado Numérico Limpio en el 100 % de la App**: Todos los campos de cantidad de la aplicación (incluyendo Transferencias entre Almacenes y Conteo Físico, además de Ingresar, Retirar y Producción) usarán `inputMode="numeric"` y `pattern="[0-9]*"`, iniciando limpios (sin `0` ni bloqueo en `1` al borrar) y obligando a escribir una cantidad entera válida mayor a cero.
 
 ---
 
-## 2. User Experience & Visual Design
+### 1. Overview & Core Concept
 
-- **Key User Flows**:
-  1. **Pantalla de Inicio de Sesión + Botón de Instalación**: Al abrir la aplicación, el usuario ingresa con su usuario (`admin`) y contraseña (`1234`), y cuenta con un botón visible **"Instalar Aplicación en este Dispositivo"** si aún no la tiene instalada.
-  2. **Instalación Guiada en Android, iOS y PC**:
-     - En Android / Chrome / Edge: Dispara el instalador nativo del sistema con un solo toque.
-     - En iPhone / Safari: Muestra instrucciones paso a paso (*Compartir → Agregar a pantalla de inicio*).
-  3. **Acceso Móvil Optimizado**: Barra superior compacta en móviles y menú lateral deslizable con tarjetas de productos grandes y botones táctiles cómodos.
-- **Visual Identity & Theme**:
-  - *Aesthetic Direction*: Industrial Clean SaaS (`#0F172A` Slate-900 para cabecera y barra de estado móvil, `#2563EB` Blue-600 para acciones primarias, fondo `#F1F5F9`).
-  - *Typography & Hierarchy*: `Inter` para interfaz general y `JetBrains Mono` para SKUs y cantidades.
+- **Qué Hace**:
+  1. **Entrega de Chips a Producción con Justificación Simple**: El administrador o encargado entrega un lote de chips (ej. `5.000 Chips UDP 8 GB`) al personal asignado indicando brevemente para qué entra a producción.
+  2. **Liquidación y Recogida en 1 Solo Paso (Chips + Empaque + Case/Adaptador)**: Cuando el personal entrega los productos terminados, en una sola ventana indicas la cantidad terminada (ej. `5.000`), qué se fabricó (**Marca, Modelo, Color, Capacidad**) y marcas con casillas qué insumos del inventario se usaron (**Empaque/Blíster**, **Case/Carcasa**, **Adaptador**). Al confirmar:
+     - Se descuentan en un solo movimiento los `5.000` chips en custodia + `5.000` empaques + `5.000` cases de sus almacenes predeterminados.
+     - Se ingresan `+5.000` unidades del producto terminado directamente al stock disponible.
+  3. **Registro Histórico de Productos Terminados**: Una pestaña y tabla dedicada donde puedes consultar y filtrar por fecha, marca, modelo o color todo lo que se produjo, viendo de un vistazo los insumos descontados y el operario responsable.
+- **Valor Principal**: Elimina pasos repetitivos y pantallas recargadas. No tienes que retirar empaque por empaque ni llenar formularios redundantes: todo el descuento de materiales y el ingreso del producto terminado ocurren en una sola confirmación matemática exacta.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+### 2. User Experience & Visual Design
 
-- **Decision 1: PWA con Validación Estricta Online para Operaciones**
-  - *Chosen Approach*: El Service Worker almacena únicamente la cáscara visual (iconos, estilos y tipografías) para que la app abra al instante desde el ícono del celular, pero todas las rutas `/api/*` van directo al servidor (`NetworkOnly`) manteniendo la regla de bloqueo si no hay internet.
-  - *Why*: Garantiza que la app se instale como aplicación nativa en Android/PC sin violar la regla de cero operaciones offline en inventario.
-- **Decision 2: Servidor Resiliente para Cloud Run y Vista Previa**
-  - *Chosen Approach*: Configurar `server.ts` y `package.json` para que sirvan tanto en desarrollo como en el contenedor publicado de Cloud Run sin producir errores 404 en rutas SPA.
-  - *Why*: Asegura que al publicar/compartir el enlace desde AI Studio, cualquier dispositivo externo cargue la aplicación de inmediato.
+- **Flujos de Usuario Clave**:
+  1. **Paso 1 — Entregar Chips a Producción (`+ Nueva Orden / Entrega de Chips`)**:
+     - Seleccionas el chip en stock (ej. `UDP 8 GB — Disp: 29.000 u. en Senkata`), escribes la cantidad con teclado numérico (`5000`), eliges el operario responsable y escribes una justificación breve (ej. *"Armado de USB Samsung y HP 8 GB"*).
+  2. **Paso 2 — Reportar y Recoger Productos Terminados (Todo en Uno)**:
+     - Dentro de la orden activa, haces clic en **"Reportar / Recoger Terminados"**.
+     - Se abre una ventana compacta dividida en tres bloques claros:
+       - **A. Qué Producto Terminado se Recoge**: Cantidad (`inputMode="numeric"`, ej. `5000` o parcial `2000`), Nombre/Descripción, **Marca** (ej. `Samsung`), **Modelo** (ej. `Metálico`), **Color** (ej. `Plata`) y **Capacidad** (ej. `8 GB`), más el almacén donde quedará disponible.
+       - **B. Insumos Utilizados (Descuento Automático en 1 Solo Paso)**:
+         - **Chip en custodia**: `5.000 u. de UDP 8 GB` (automático de la orden).
+         - Casilla `[x] Empaque / Blíster`: Selector de empaques con stock (ej. `Blíster Samsung 8GB — Disp: 12.000 u. en Senkata`). Descuenta `5.000 u.`
+         - Casilla `[x] Case / Carcasa`: Selector de cases con stock (ej. `Case Samsung 8GB — Disp: 9.000 u. en Senkata`). Descuenta `5.000 u.`
+         - Casilla `[ ] Adaptador / Accesorio`: Selector opcional si el armado lleva adaptador.
+       - **C. Resumen Matemático antes de Confirmar**: Muestra en una sola barra los descuentos simultáneos (`-5.000 Chips`, `-5.000 Empaques`, `-5.000 Cases`) y el ingreso (`+5.000 Terminados disponibles`).
+  3. **Paso 3 — Consulta del Registro de Productos Terminados**:
+     - En la sección **Productos Terminados / Registro**, ves la tabla limpia con buscador rápido por marca/modelo/color y columnas exactas:
+       - **Fecha y Hora**
+       - **Producto Terminado** (Nombre, Marca, Modelo, Capacidad, Color)
+       - **Cantidad Recogida** (`+5.000 u.`)
+       - **Insumos Descontados** (ej. `5.000 UDP 8GB + 5.000 Empaque Samsung + 5.000 Case Samsung`)
+       - **Operario Responsable** y **Almacén Destino**.
+
+- **Identidad Visual y Tema**:
+  - *Dirección Estética*: Panel operativo industrial limpio y utilitario de alta legibilidad, siguiendo un esquema de una sola elevación (`border border-slate-200 bg-white`), sin etiquetas decorativas redundantes.
+  - *Paleta de Color (60-30-10)*:
+    - `60%` Lienzo neutro (`#F8FAFC` / `#FFFFFF`) para máxima claridad en móvil y escritorio.
+    - `30%` Superficies estructurales (`#F1F5F9`, bordes `#E2E8F0`, texto `#0F172A` y `#475569`).
+    - `10%` Acentos semánticos funcionales: Esmeralda (`#059669`) para ingresos y productos terminados disponibles, Ámbar (`#D97706`) para descuento de insumos, Azul (`#0284C7`) para órdenes activas.
+  - *Tipografía y Disciplina Tabular*: Tipografía sans geométrica limpia para encabezados y etiquetas, combinada estrictamente con números tabulares monoespaciados (`font-mono tabular-nums`) en todas las cantidades, saldos y fechas. Metadata en texto limpio separado por `·` sin cápsulas decorativas innecesarias.
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
+### 3. Key Product Decisions & Trade-Offs
 
-- **Architecture & Component Diagram**:
+- **Decisión 1: Descuento Multi-Insumo en Una Sola Transacción Atómica**
+  - *Enfoque Elegido*: Permitir seleccionar hasta 3 insumos complementarios (Empaque/Blíster, Case/Carcasa y Adaptador) en el mismo formulario de reporte/recogida de la orden y procesarlos dentro de la misma transacción del servidor junto con los chips y el ingreso del producto terminado.
+  - *Por Qué*: Refleja exactamente tu operación real ("recoger los 5.000 chips, los 5.000 empaques y los 5.000 cases en uno solo"), evita errores humanos de olvidarse de descontar el blíster o el case, y mantiene el Kardex perfectamente cuadrado.
+- **Decisión 2: Ficha Ligera de Marca, Modelo, Color y Capacidad al Registrar el Terminado**
+  - *Enfoque Elegido*: Al reportar el producto terminado, si ese modelo/color aún no existe en el catálogo, el sistema lo crea o actualiza automáticamente con su **Marca, Modelo, Color y Capacidad** y lo suma de inmediato al stock disponible si la opción de recogida inmediata está activa.
+  - *Por Qué*: Evita que tengas que ir primero al catálogo a crear cada combinación de marca/modelo/color antes de producir.
+- **Decisión 3: Estandarización Global de Inputs Numéricos (`inputMode="numeric"`)**
+  - *Enfoque Elegido*: Reemplazar todos los `<input type="number">` restantes (incluyendo Transferencias y Conteo Físico) por inputs controlados con `type="text" inputMode="numeric" pattern="[0-9]*"`, limpieza de ceros a la izquierda (`replace(/^0+/, '')`) y estado vacío (`''`) cuando aún no se ha escrito un valor.
+  - *Por Qué*: Garantiza que en cualquier celular o tablet siempre se abra el teclado numérico puro, nunca aparezca un `0` estorbando ni se quede bloqueado el primer dígito al borrar.
+
+---
+
+### 4. Technical Architecture & Data Strategy *(Technical Reference)*
+
+#### Diagrama de Arquitectura y Flujo de Datos
+
 ```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                 CLIENTE MÓVIL / PC (PWA INSTALABLE)                      │
-│  ┌──────────────────────────┐  ┌──────────────────────────────────────┐  │
-│  │  Web App Manifest + SW   │  │  Botón "Instalar App" (usePWAInstall)│  │
-│  │  Iconos 192/512/Maskable │  │  Soporte Android Chrome / iOS / PC   │  │
-│  └────────────┬─────────────┘  └──────────────────┬───────────────────┘  │
-│               └─────────────────┬─────────────────┘                      │
-│                                 ▼                                        │
-│  ┌────────────────────────────────────────────────────────────────────┐  │
-│  │  ControlStock Pro SPA (Login admin/1234 + Sidebar + CRUD Completo) │  │
-│  └──────────────────────────────┬─────────────────────────────────────┘  │
-└─────────────────────────────────┼────────────────────────────────────────┘
-                                  │ HTTPS (/api/* nunca cacheado)
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│           SERVIDOR EXPRESS + VITE / STATIC FALLBACK (PORT 3000)          │
-│  • Sirve /api/* conectado a Cloud SQL PostgreSQL                         │
-│  • Sirve manifest, iconos PNG/SVG y SPA fallback sin error 404           │
-└──────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────┐
+│                   INTERFAZ WEB (MÓVIL / TABLET / DESKTOP)                  │
+│  ┌──────────────────────┐  ┌──────────────────────────┐  ┌──────────────┐  │
+│  │  Inventario y Stock  │  │  Órdenes de Producción   │  │ Registro de  │  │
+│  │  • Ingresar (1 paso) │  │  • Entregar Chips + Nota │  │  Terminados  │  │
+│  │  • Retirar (1 paso)  │  │  • Recoger en 1 Paso:    │  │ • Fecha/Hora │  │
+│  │  • Teclado numérico  │  │    Chips + Empaque +     │  │ • Marca/Mod/ │  │
+│  │    limpio sin ceros  │  │    Case + Adaptador      │  │   Color/Cap  │  │
+│  └──────────┬───────────┘  └────────────┬─────────────┘  │ • Insumos y  │  │
+│             │                           │                │   Operario   │  │
+└─────────────┼───────────────────────────┼────────────────┴──────▲───────┘  │
+              │                           │                       │
+              ▼                           ▼                       │
+┌─────────────────────────────────────────────────────────────────┴──────────┐
+│                 SERVIDOR TRANSACCIONAL & MOTOR KARDEX                      │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │ Transacción Unificada de Producción y Recogida (`/api/production/*`) │  │
+│  │  1. Descuenta Chips de Custodia de la Orden (-5.000 Chips UDP)       │  │
+│  │  2. Descuenta de su Almacén Predeterminado:                          │  │
+│  │     • Empaque / Blíster seleccionado (-5.000 u.)                     │  │
+│  │     • Case / Carcasa seleccionado (-5.000 u.)                        │  │
+│  │     • Adaptador seleccionado (opcional)                              │  │
+│  │  3. Crea/Resuelve Producto Terminado (Marca, Modelo, Color, Cap.)    │  │
+│  │  4. Suma +5.000 u. al Stock Disponible y guarda el resumen detallado │  │
+│  │     de insumos + operario en el Registro de Productos Terminados.    │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Data Model & State**:
-  - Se mantiene intacta la base de datos PostgreSQL en Cloud SQL con el inventario limpio en cero, el usuario `admin` (`1234`) y las clasificaciones personalizables.
-- **Interactive Component & State Mapping**:
-  - `PWAInstallButton`: Detecta `beforeinstallprompt` en Android/PC, detecta Safari en iOS y se oculta automáticamente cuando ya corre instalada (`standalone`).
-  - Modal **"Enlace para Celular"**: Muestra dentro de la barra lateral el enlace directo y cómo activarlo con el botón **Share / Deploy** de AI Studio.
+#### Modelo de Datos y Mapeo de Estado Interactivo
+
+- **Descuento Multi-Insumo en Lotes de Producción**:
+  - Cada línea enviada al endpoint de registro de producción soportará:
+    - `strategicQtyConsumed`: Cantidad de chips consumidos de la orden.
+    - `selectedSupplies`: Arreglo de insumos secundarios a descontar automáticamente en el mismo acto (cada uno con `productId`, `roleLabel` como `'Empaque' | 'Case' | 'Adaptador'` y `quantity`).
+    - `finishedProductSpec`: `{ finishedProductId, name, brand, model, color, capacity }` para crear o actualizar los metadatos del producto terminado.
+    - `autoReceiveToWarehouseId`: Almacén destino donde las unidades terminadas pasan directamente a estado `AVAILABLE` (disponible en inventario) en el mismo paso, generando su registro de entrega y guardando en `notes` / `usedWithdrawalFolios` el resumen legible de todos los insumos descontados (`"5.000 UDP 8GB + 5.000 Empaque Samsung + 5.000 Case Samsung"`).
+- **Validación de Inputs Numéricos en Toda la App**:
+  - En Inventario (Ingresar, Retirar, Stock Inicial), Producción (Nueva Orden, Descontar Insumo, Armar/Recoger, Devolver Sobrantes, Aceptar Entrega, Recoger Terminados) y Auditoría (Transferencias entre Almacenes y Conteo Físico), el manejador de cambio filtra `e.target.value.replace(/\D/g, '').replace(/^0+/, '')`, manteniendo `''` en pantalla cuando está vacío y deshabilitando el botón de confirmación hasta que el valor sea un entero `>= 1` y `<= stockDisponible`.
